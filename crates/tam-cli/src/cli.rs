@@ -59,6 +59,20 @@ pub enum Commands {
         name: Option<String>,
     },
 
+    /// Toggle Slack notifications for a task's running agent
+    Notify {
+        /// Task name (resolved from current directory if omitted)
+        name: Option<String>,
+
+        /// Turn notifications on
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+
+        /// Turn notifications off
+        #[arg(long)]
+        off: bool,
+    },
+
     /// Attach to a running agent
     Attach {
         /// Task name (resolved from current directory if omitted)

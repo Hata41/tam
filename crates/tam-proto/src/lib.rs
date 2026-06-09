@@ -46,6 +46,14 @@ pub struct AgentInfo {
     pub context_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Whether this agent triggers Slack notifications on state changes.
+    /// Defaults to true so older daemons (no field) keep notifying.
+    #[serde(default = "default_true")]
+    pub notify: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Client -> Daemon request.
@@ -82,6 +90,11 @@ pub enum Request {
         id: String,
         cols: u16,
         rows: u16,
+    },
+    /// Enable or disable Slack notifications for an agent.
+    SetNotify {
+        id: String,
+        enabled: bool,
     },
     /// Hook callback from an agent process (e.g. Claude Code hooks).
     HookEvent {
@@ -317,6 +330,7 @@ mod tests {
                 viewers: 0,
                 context_percent: None,
                 task: None,
+                notify: true,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -493,6 +507,7 @@ mod tests {
             viewers: 0,
             context_percent: None,
             task: None,
+            notify: true,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("\"task\""));
@@ -513,5 +528,7 @@ mod tests {
         let info: AgentInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.id, "test");
         assert!(info.task.is_none());
+        // missing field defaults to notifying, matching old daemon behavior
+        assert!(info.notify);
     }
 }

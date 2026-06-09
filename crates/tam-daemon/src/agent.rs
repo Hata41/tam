@@ -43,6 +43,8 @@ pub struct Agent {
     reported_state: AgentState,
     /// Cached context usage percentage, updated periodically.
     context_percent: Option<u8>,
+    /// Whether this agent should trigger Slack notifications. Default true.
+    notify: bool,
     _reader_handle: JoinHandle<()>,
 }
 
@@ -130,6 +132,7 @@ impl Agent {
             last_output_at,
             reported_state: AgentState::Working,
             context_percent: None,
+            notify: true,
             _reader_handle: reader_handle,
         })
     }
@@ -227,7 +230,18 @@ impl Agent {
             viewers: self.viewers.load(Ordering::Relaxed),
             context_percent: self.context_percent,
             task: Some(id.to_string()),
+            notify: self.notify,
         }
+    }
+
+    /// Whether this agent triggers Slack notifications.
+    pub fn notify_enabled(&self) -> bool {
+        self.notify
+    }
+
+    /// Enable or disable Slack notifications for this agent.
+    pub fn set_notify(&mut self, enabled: bool) {
+        self.notify = enabled;
     }
 
     /// Collect lightweight metadata for two-phase context refresh.

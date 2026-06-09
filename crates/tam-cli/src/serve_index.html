@@ -92,7 +92,8 @@
     <div id="term-bar">
       <button class="ghost" id="back">‹ Back</button>
       <span class="title" id="term-title"></span>
-      <button class="danger" id="kill" style="margin-left:auto;">Kill</button>
+      <button class="ghost" id="bell" style="margin-left:auto;" title="Slack notifications">🔔</button>
+      <button class="danger" id="kill">Kill</button>
     </div>
     <div id="terminal"></div>
     <div id="controls">
@@ -183,6 +184,7 @@ const termView = document.getElementById("term-view");
 const listEl = document.getElementById("list");
 const statusEl = document.getElementById("status");
 const titleEl = document.getElementById("term-title");
+const bellEl = document.getElementById("bell");
 
 // --- agent list (polling) --------------------------------------------------
 async function poll() {
@@ -209,7 +211,7 @@ function renderList(agents) {
     row.className = "agent";
     const ctx = (a.context_percent != null) ? ` · ctx ${a.context_percent}%` : "";
     row.innerHTML = `<div>
-        <div class="name">${esc(a.task || a.id)}</div>
+        <div class="name">${esc(a.task || a.id)}${a.notify === false ? " 🔕" : ""}</div>
         <div class="meta">${esc(a.provider)} · up ${fmtUptime(a.uptime_secs)}${ctx}<br>${esc(a.dir)}</div>
       </div>
       <span class="badge b-${a.state}">${a.state}</span>`;
@@ -231,10 +233,21 @@ let pollTimer = setInterval(poll, 1500);
 poll();
 
 // --- terminal view ---------------------------------------------------------
-let term = null, fit = null, ws = null, currentId = null;
+let term = null, fit = null, ws = null, currentId = null, currentNotify = true;
+
+function updateBell() { bellEl.textContent = currentNotify ? "🔔" : "🔕"; }
+
+bellEl.onclick = async () => {
+  if (!currentId) return;
+  const next = !currentNotify;
+  const r = await fetch("/api/notify/" + encodeURIComponent(currentId) + q("enabled=" + next), { method: "POST" });
+  if (r.ok) { currentNotify = next; updateBell(); }
+};
 
 function openTerm(agent) {
   currentId = agent.id;
+  currentNotify = agent.notify !== false; // default on
+  updateBell();
   titleEl.textContent = agent.task || agent.id;
   listView.classList.add("hidden");
   termView.classList.remove("hidden");

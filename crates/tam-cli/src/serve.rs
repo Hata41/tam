@@ -89,6 +89,7 @@ pub async fn run(
         .route("/api/projects", get(list_projects))
         .route("/api/spawn", post(spawn_agent))
         .route("/api/kill/:id", post(kill_agent))
+        .route("/api/notify/:id", post(set_notify))
         .route("/ws/attach/:id", get(ws_attach))
         .with_state(state);
 
@@ -132,8 +133,11 @@ async fn event_watcher(slack_webhook: Option<String>, link: String) {
             Ok(mut client) => loop {
                 match client.read_message().await {
                     Ok(ServerMessage::Event(ev)) => {
-                        if let Some(webhook) = &slack_webhook {
-                            if let Some(text) = event_notification(&ev, &link) {
+                        if let (Some(webhook), Some((id, text))) =
+                            (&slack_webhook, notification_for(&ev, &link))
+                        {
+                            // respect the agent's per-session notify toggle
+                            if agent_notify_enabled(&id).await {
                                 let _ = slack_post(webhook, &text).await;
                             }
                         }
@@ -147,22 +151,39 @@ async fn event_watcher(slack_webhook: Option<String>, link: String) {
     }
 }
 
-/// Build a Slack message for events worth pinging about, or None to stay quiet.
-fn event_notification(ev: &Event, link: &str) -> Option<String> {
+/// For events worth pinging about, return (agent id, Slack message); else None.
+fn notification_for(ev: &Event, link: &str) -> Option<(String, String)> {
     match ev {
         Event::StateChange {
             id,
             new: AgentState::Blocked,
             ..
-        } => Some(format!(":lock: *{id}* needs your approval — {link}")),
+        } => Some((
+            id.clone(),
+            format!(":lock: *{id}* needs your approval — {link}"),
+        )),
         Event::StateChange {
             id,
             new: AgentState::Input,
             ..
-        } => Some(format!(
-            ":speech_balloon: *{id}* finished — waiting for your input — {link}"
+        } => Some((
+            id.clone(),
+            format!(":speech_balloon: *{id}* finished — waiting for your input — {link}"),
         )),
         _ => None,
+    }
+}
+
+/// Whether an agent currently has Slack notifications enabled. Fails open
+/// (returns true) if the daemon can't be queried — better a stray ping than a
+/// silently missed one.
+async fn agent_notify_enabled(id: &str) -> bool {
+    match daemon_request(Request::List).await {
+        Ok(Response::Agents { agents }) => match agents.iter().find(|a| a.id == id) {
+            Some(agent) => agent.notify,
+            None => false, // agent gone — nothing to notify about
+        },
+        _ => true,
     }
 }
 
@@ -246,6 +267,30 @@ async fn kill_agent(
 async fn daemon_request(req: Request) -> Result<Response> {
     let mut client = Client::connect().await?;
     client.send(req).await
+}
+
+#[derive(Deserialize)]
+struct NotifyQuery {
+    token: Option<String>,
+    enabled: Option<bool>,
+}
+
+/// Enable/disable Slack notifications for one agent (?enabled=true|false).
+async fn set_notify(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<NotifyQuery>,
+) -> AxumResponse {
+    if !state.authed(&q.token) {
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    }
+    let enabled = q.enabled.unwrap_or(true);
+    match daemon_request(Request::SetNotify { id, enabled }).await {
+        Ok(Response::Ok) => StatusCode::OK.into_response(),
+        Ok(Response::Error { message }) => (StatusCode::BAD_GATEWAY, message).into_response(),
+        Ok(_) => (StatusCode::BAD_GATEWAY, "unexpected daemon response").into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Serialize)]

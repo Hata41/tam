@@ -426,6 +426,53 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Notify { name, on, off } => {
+            let ledger = Ledger::load()?;
+            let name = resolve_task_name(name, &ledger)?;
+            let mut client = client::Client::connect().await?;
+
+            // Explicit --on/--off, otherwise flip the agent's current state.
+            let enabled = if on {
+                true
+            } else if off {
+                false
+            } else {
+                match client.send(tam_proto::Request::List).await? {
+                    tam_proto::Response::Agents { agents } => {
+                        match agents.iter().find(|a| a.id == name) {
+                            Some(a) => !a.notify,
+                            None => {
+                                eprintln!("No running agent for task '{}'.", name);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    _ => true,
+                }
+            };
+
+            let resp = client
+                .send(tam_proto::Request::SetNotify {
+                    id: name.clone(),
+                    enabled,
+                })
+                .await?;
+            match resp {
+                tam_proto::Response::Ok => {
+                    println!(
+                        "Slack notifications {} for task '{}'.",
+                        if enabled { "enabled" } else { "disabled" },
+                        name
+                    );
+                }
+                tam_proto::Response::Error { message } => {
+                    eprintln!("Error: {}", message);
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+
         Commands::Serve {
             bind,
             port,

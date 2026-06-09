@@ -223,6 +223,7 @@ mod tests {
             viewers: 0,
             context_percent: None,
             task: Some("feat".into()),
+            notify: true,
         };
         let task = Task::from_snapshot(test_snapshot(), Some(info));
         assert_eq!(task.status(), TaskStatus::Run);
@@ -240,6 +241,7 @@ mod tests {
             viewers: 0,
             context_percent: None,
             task: Some("feat".into()),
+            notify: true,
         };
         let task = Task::from_snapshot(test_snapshot(), Some(info));
         assert_eq!(task.status(), TaskStatus::Input);
@@ -257,6 +259,7 @@ mod tests {
             viewers: 0,
             context_percent: None,
             task: Some("feat".into()),
+            notify: true,
         };
         let task = Task::from_snapshot(test_snapshot(), Some(info));
         assert_eq!(task.status(), TaskStatus::Block);
@@ -306,6 +309,7 @@ mod tests {
             viewers: 0,
             context_percent: None,
             task: Some("feat".into()),
+            notify: true,
         };
         let mut snapshot = test_snapshot();
         snapshot.last_activity = Some(1000); // very old
