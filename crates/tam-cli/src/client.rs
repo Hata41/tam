@@ -6,8 +6,18 @@ use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios};
 use tam_proto::{Request, Response, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::signal::unix::{signal, SignalKind};
 
 const DETACH_KEY: u8 = 0x1d; // ctrl-]
+
+/// Scan stdin bytes for the detach key (ctrl-]). Returns the bytes to forward to
+/// the agent (everything before the detach key) and whether detach was triggered.
+fn scan_detach(data: &[u8]) -> (Vec<u8>, bool) {
+    match data.iter().position(|&b| b == DETACH_KEY) {
+        Some(pos) => (data[..pos].to_vec(), true),
+        None => (data.to_vec(), false),
+    }
+}
 
 pub struct Client {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -197,16 +207,19 @@ impl Client {
             }
         }
 
-        self.raw_relay().await
+        self.raw_relay(id).await
     }
 
     /// Bidirectional relay: stdin→socket, socket→stdout.
     /// Intercepts the detach key (ctrl-]) to break out.
-    async fn raw_relay(&mut self) -> Result<()> {
+    async fn raw_relay(&mut self, id: &str) -> Result<()> {
         let mut stdout = tokio::io::stdout();
         let mut socket_buf = [0u8; 4096];
         let mut filter = KbdProtoFilter::new();
         let mut filtered = Vec::with_capacity(4096);
+        // Watch for local terminal resizes so we can keep the agent's PTY in sync.
+        let mut winch =
+            signal(SignalKind::window_change()).context("failed to listen for terminal resize")?;
 
         // Dedicated stdin reader — never cancelled by select!
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
@@ -231,13 +244,13 @@ impl Client {
                 biased;
                 // Keyboard input → agent (priority: detect detach key promptly)
                 Some(data) = stdin_rx.recv() => {
-                    if let Some(pos) = data.iter().position(|&b| b == DETACH_KEY) {
-                        if pos > 0 {
-                            self.writer.write_all(&data[..pos]).await?;
-                        }
+                    let (out, detach) = scan_detach(&data);
+                    if !out.is_empty() {
+                        self.writer.write_all(&out).await?;
+                    }
+                    if detach {
                         break;
                     }
-                    self.writer.write_all(&data).await?;
                 }
                 // Agent output → terminal (filtered)
                 result = self.reader.read(&mut socket_buf) => {
@@ -250,6 +263,18 @@ impl Client {
                             stdout.flush().await?;
                         }
                         Err(_) => break,
+                    }
+                }
+                // Terminal resized: tell the daemon to resize the agent's PTY so it
+                // redraws at the new size. Sent on a separate control connection
+                // because this socket is in raw byte-relay mode. try_connect avoids
+                // any stderr noise (the daemon is already up — we're attached to it).
+                _ = winch.recv() => {
+                    let (cols, rows) = terminal_size();
+                    if let Ok(Some(mut c)) = Client::try_connect().await {
+                        let _ = c
+                            .send(Request::Resize { id: id.to_string(), cols, rows })
+                            .await;
                     }
                 }
             }
@@ -409,6 +434,33 @@ mod tests {
         let mut out = Vec::new();
         f.filter(input, &mut out);
         out
+    }
+
+    #[test]
+    fn scan_forwards_plain_text() {
+        assert_eq!(scan_detach(b"hello"), (b"hello".to_vec(), false));
+    }
+
+    #[test]
+    fn scan_detaches_on_detach_key() {
+        assert_eq!(scan_detach(&[DETACH_KEY]), (vec![], true));
+    }
+
+    #[test]
+    fn scan_forwards_bytes_before_detach() {
+        assert_eq!(
+            scan_detach(&[b'a', b'b', DETACH_KEY]),
+            (b"ab".to_vec(), true)
+        );
+    }
+
+    #[test]
+    fn scan_drops_bytes_after_detach_key() {
+        // everything up to the detach key is forwarded; detach is signalled
+        assert_eq!(
+            scan_detach(&[b'x', DETACH_KEY, b'y']),
+            (b"x".to_vec(), true)
+        );
     }
 
     #[test]

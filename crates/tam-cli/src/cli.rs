@@ -114,6 +114,29 @@ pub enum Commands {
         agent: String,
     },
 
+    /// Serve a web UI for remote access (e.g. from a phone over Tailscale)
+    Serve {
+        /// Address to bind. Default 0.0.0.0 so your Tailscale IP is reachable.
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 8765)]
+        port: u16,
+
+        /// Access token (default: a random one is generated and printed)
+        #[arg(long, env = "TAM_SERVE_TOKEN")]
+        token: Option<String>,
+
+        /// Slack Incoming Webhook URL to post the access link to on startup
+        #[arg(long, env = "TAM_SLACK_WEBHOOK")]
+        slack_webhook: Option<String>,
+
+        /// Install a systemd --user service instead of running (auto-start on login)
+        #[arg(long)]
+        install_service: bool,
+    },
+
     /// Stop all agents and shut down the daemon
     Shutdown,
 

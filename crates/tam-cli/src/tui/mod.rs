@@ -842,7 +842,7 @@ fn draw_status_bar(name: &str, provider: &str, cols: u16, rows: u16) {
     let mut out = std::io::stdout();
 
     let bar = format!(" tam > {name} ({provider})");
-    let hint = "ctrl-]: detach ";
+    let hint = "C-a b: detach ";
     let padding = (cols as usize).saturating_sub(bar.len() + hint.len());
 
     let _ = write!(out, "\x1b[1;{}r", rows - 1);

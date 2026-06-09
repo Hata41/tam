@@ -438,6 +438,7 @@ async fn dispatch(request: Request, state: &Arc<Mutex<DaemonState>>) -> Response
             ),
         },
         Request::Scrollback { id } => handle_scrollback(state, &id).await,
+        Request::Resize { id, cols, rows } => handle_resize(state, &id, cols, rows).await,
         Request::HookEvent { agent_id, event } => handle_hook_event(state, &agent_id, &event).await,
         Request::Shutdown => handle_shutdown(state).await,
         Request::Hello { protocol_version } => {
@@ -572,6 +573,24 @@ async fn handle_scrollback(state: &Arc<Mutex<DaemonState>>, id: &str) -> Respons
             Response::Scrollback {
                 data: String::from_utf8_lossy(tail).into_owned(),
             }
+        }
+        None => Response::Error {
+            message: format!("agent '{}' not found", id),
+        },
+    }
+}
+
+async fn handle_resize(
+    state: &Arc<Mutex<DaemonState>>,
+    id: &str,
+    cols: u16,
+    rows: u16,
+) -> Response {
+    let state = state.lock().await;
+    match state.agents.get(id) {
+        Some(agent) => {
+            agent.resize(cols, rows);
+            Response::Ok
         }
         None => Response::Error {
             message: format!("agent '{}' not found", id),

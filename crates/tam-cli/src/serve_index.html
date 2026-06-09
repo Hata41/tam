@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="tam" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="manifest" href="manifest.json" />
+<title>tam</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+<style>
+  :root { --bg:#0b0e14; --panel:#141925; --fg:#e6e6e6; --muted:#8a93a6; --accent:#5aa9ff; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 15px/1.4 -apple-system, system-ui, sans-serif; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  header { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid #222a3a; }
+  header h1 { font-size:17px; margin:0; font-weight:600; letter-spacing:.5px; }
+  header .sub { color:var(--muted); font-size:12px; }
+  #views { position:relative; }
+  .hidden { display:none !important; }
+
+  /* List view */
+  #list { padding:10px 12px; display:flex; flex-direction:column; gap:10px; }
+  .agent { background:var(--panel); border:1px solid #222a3a; border-radius:12px;
+    padding:14px; display:flex; align-items:center; gap:12px; cursor:pointer; }
+  .agent:active { background:#1b2233; }
+  .agent .name { font-weight:600; font-size:16px; }
+  .agent .meta { color:var(--muted); font-size:12px; margin-top:2px; word-break:break-all; }
+  .badge { margin-left:auto; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .b-working { background:#13351f; color:#56d98a; }
+  .b-blocked { background:#3a1f13; color:#ff9d57; }
+  .b-input   { background:#13243a; color:#5aa9ff; }
+  .b-idle    { background:#23283a; color:#8a93a6; }
+  .empty { color:var(--muted); text-align:center; padding:40px 16px; }
+
+  /* Terminal view */
+  #term-view { display:flex; flex-direction:column; height:100dvh; }
+  #term-bar { display:flex; align-items:center; gap:10px; padding:10px 12px; border-bottom:1px solid #222a3a; }
+  #term-bar .title { font-weight:600; }
+  #term-bar button { margin:0; }
+  #terminal { flex:1; min-height:0; padding:6px; }
+  /* we translate finger drags to scroll ourselves, so suppress native panning */
+  #terminal, #terminal .xterm-viewport, #terminal .xterm-screen { touch-action: none; }
+  #controls { border-top:1px solid #222a3a; padding:8px; display:flex; flex-direction:column; gap:8px; }
+  #keys { display:flex; gap:6px; overflow-x:auto; }
+  .key { flex:0 0 auto; background:#1b2233; border:1px solid #2a3346; color:var(--fg);
+    border-radius:8px; padding:8px 12px; font-size:14px; }
+  .key:active { background:#2a3346; }
+  #send-row { display:flex; gap:8px; }
+  #send-row input { flex:1; background:#0f1420; border:1px solid #2a3346; color:var(--fg);
+    border-radius:8px; padding:10px 12px; font-size:16px; }
+  button { background:var(--accent); border:0; color:#04122b; font-weight:600;
+    border-radius:8px; padding:10px 14px; font-size:14px; }
+  button.ghost { background:#1b2233; color:var(--fg); border:1px solid #2a3346; }
+  button.danger { background:#3a1f1f; color:#ff8c8c; border:1px solid #5a2a2a; }
+
+  /* New task view */
+  #new-form { padding:14px; display:flex; flex-direction:column; gap:14px; }
+  #new-form label { display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted); }
+  #new-form select, #new-form input, #new-form textarea {
+    background:#0f1420; border:1px solid #2a3346; color:var(--fg);
+    border-radius:8px; padding:10px 12px; font-size:16px; width:100%; }
+  #new-error { color:#ff8c8c; font-size:13px; min-height:1em; }
+
+  /* Command menu (bottom sheet) */
+  #cmd-menu { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:flex-end; z-index:50; }
+  #cmd-menu .sheet { width:100%; max-height:72dvh; overflow-y:auto; background:var(--panel);
+    border-top:1px solid #2a3346; border-radius:16px 16px 0 0;
+    padding:12px 12px calc(14px + env(safe-area-inset-bottom)); }
+  #cmd-menu .sheet-head { display:flex; align-items:center; justify-content:space-between;
+    padding:2px 4px 8px; font-weight:600; }
+  .cmd-group { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.6px; margin:12px 4px 6px; }
+  .cmd-row { display:grid; grid-template-columns:repeat(auto-fill, minmax(70px, 1fr)); gap:8px; }
+  .cmd { background:#1b2233; border:1px solid #2a3346; color:var(--fg); border-radius:8px; padding:12px 6px; font-size:14px; }
+  .cmd:active { background:#2a3346; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tam</h1>
+  <span class="sub" id="status">connecting…</span>
+  <button class="ghost" id="new-btn" style="margin-left:auto; padding:6px 12px;">+ New</button>
+</header>
+<div id="views">
+  <div id="list-view">
+    <div id="list"></div>
+  </div>
+  <div id="term-view" class="hidden">
+    <div id="term-bar">
+      <button class="ghost" id="back">‹ Back</button>
+      <span class="title" id="term-title"></span>
+      <button class="danger" id="kill" style="margin-left:auto;">Kill</button>
+    </div>
+    <div id="terminal"></div>
+    <div id="controls">
+      <div id="keys">
+        <button class="key" data-scroll="up">⇞ Scroll</button>
+        <button class="key" data-scroll="down">⇟ Scroll</button>
+        <button class="key" id="menu-btn">☰ Keys</button>
+      </div>
+      <div id="send-row">
+        <input id="send-input" placeholder="Type a message…" autocapitalize="off" autocomplete="off" autocorrect="off" />
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+    <div id="cmd-menu" class="hidden">
+      <div class="sheet">
+        <div class="sheet-head"><span>Commands</span><button class="ghost" id="menu-close">Done</button></div>
+        <div class="cmd-group">Keys</div>
+        <div class="cmd-row">
+          <button class="cmd" data-seq="\r">⏎ Enter</button>
+          <button class="cmd" data-seq="\x1b">Esc</button>
+          <button class="cmd" data-seq="\x1b\x1b">Esc Esc</button>
+          <button class="cmd" data-seq="\t">⇥ Tab</button>
+          <button class="cmd" data-seq="\x1b[Z">⇧ Tab</button>
+          <button class="cmd" data-seq="\x7f">⌫ Bksp</button>
+          <button class="cmd" data-seq="\x1b[A">↑</button>
+          <button class="cmd" data-seq="\x1b[B">↓</button>
+          <button class="cmd" data-seq="\x1b[D">←</button>
+          <button class="cmd" data-seq="\x1b[C">→</button>
+        </div>
+        <div class="cmd-group">Control</div>
+        <div class="cmd-row">
+          <button class="cmd" data-seq="\x03">Ctrl-C</button>
+          <button class="cmd" data-seq="\x04">Ctrl-D</button>
+          <button class="cmd" data-seq="\x0c">Ctrl-L</button>
+          <button class="cmd" data-seq="\x15">Ctrl-U</button>
+          <button class="cmd" data-seq="\x01">Ctrl-A</button>
+          <button class="cmd" data-seq="\x05">Ctrl-E</button>
+        </div>
+        <div class="cmd-group">Claude triggers</div>
+        <div class="cmd-row">
+          <button class="cmd" data-seq="/">/ cmds</button>
+          <button class="cmd" data-seq="@">@ files</button>
+          <button class="cmd" data-seq="#"># memory</button>
+          <button class="cmd" data-seq="!">! bash</button>
+        </div>
+        <div class="cmd-group">Quick pick</div>
+        <div class="cmd-row">
+          <button class="cmd" data-seq="1">1</button>
+          <button class="cmd" data-seq="2">2</button>
+          <button class="cmd" data-seq="3">3</button>
+          <button class="cmd" data-seq="y">y</button>
+          <button class="cmd" data-seq="n">n</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="new-view" class="hidden">
+    <div id="term-bar">
+      <button class="ghost" id="new-cancel">‹ Back</button>
+      <span class="title">New task</span>
+    </div>
+    <div id="new-form">
+      <label>Project
+        <select id="new-project"></select>
+      </label>
+      <label>Task name
+        <input id="new-name" placeholder="fix-auth" autocapitalize="off" autocomplete="off" autocorrect="off" />
+      </label>
+      <label>Initial prompt (optional)
+        <textarea id="new-prompt" rows="3" placeholder="What should the agent do?"></textarea>
+      </label>
+      <button id="new-start">Start agent</button>
+      <div id="new-error"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+// --- token handling --------------------------------------------------------
+const url = new URL(location.href);
+let token = url.searchParams.get("token");
+if (token) {
+  localStorage.setItem("tam_token", token);
+  url.searchParams.delete("token");
+  history.replaceState(null, "", url.pathname + url.hash);
+} else {
+  token = localStorage.getItem("tam_token");
+}
+const q = (extra) => "?token=" + encodeURIComponent(token || "") + (extra ? "&" + extra : "");
+
+// --- elements --------------------------------------------------------------
+const listView = document.getElementById("list-view");
+const termView = document.getElementById("term-view");
+const listEl = document.getElementById("list");
+const statusEl = document.getElementById("status");
+const titleEl = document.getElementById("term-title");
+
+// --- agent list (polling) --------------------------------------------------
+async function poll() {
+  try {
+    const r = await fetch("/api/agents" + q());
+    if (r.status === 401) { statusEl.textContent = "bad token"; return; }
+    if (!r.ok) { statusEl.textContent = "daemon error"; return; }
+    const agents = await r.json();
+    statusEl.textContent = agents.length + (agents.length === 1 ? " agent" : " agents");
+    renderList(agents);
+  } catch (e) {
+    statusEl.textContent = "offline";
+  }
+}
+
+function renderList(agents) {
+  if (!agents.length) {
+    listEl.innerHTML = '<div class="empty">No running agents.<br>Start one from your computer with <b>tam run</b>.</div>';
+    return;
+  }
+  listEl.innerHTML = "";
+  for (const a of agents) {
+    const row = document.createElement("div");
+    row.className = "agent";
+    const ctx = (a.context_percent != null) ? ` · ctx ${a.context_percent}%` : "";
+    row.innerHTML = `<div>
+        <div class="name">${esc(a.task || a.id)}</div>
+        <div class="meta">${esc(a.provider)} · up ${fmtUptime(a.uptime_secs)}${ctx}<br>${esc(a.dir)}</div>
+      </div>
+      <span class="badge b-${a.state}">${a.state}</span>`;
+    row.onclick = () => openTerm(a);
+    listEl.appendChild(row);
+  }
+}
+
+function fmtUptime(s) {
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  return Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m";
+}
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+let pollTimer = setInterval(poll, 1500);
+poll();
+
+// --- terminal view ---------------------------------------------------------
+let term = null, fit = null, ws = null, currentId = null;
+
+function openTerm(agent) {
+  currentId = agent.id;
+  titleEl.textContent = agent.task || agent.id;
+  listView.classList.add("hidden");
+  termView.classList.remove("hidden");
+  clearInterval(pollTimer);
+
+  term = new Terminal({ fontSize: 13, cursorBlink: true, scrollback: 5000,
+    theme: { background: "#0b0e14", foreground: "#e6e6e6" } });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("terminal"));
+  fit.fit();
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const dims = `cols=${term.cols}&rows=${term.rows}`;
+  ws = new WebSocket(`${proto}://${location.host}/ws/attach/${encodeURIComponent(agent.id)}${q(dims)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+    else term.write(ev.data);
+  };
+  ws.onclose = () => term.write("\r\n[disconnected]\r\n");
+  ws.onopen = () => sendCtrl({ type: "resize", cols: term.cols, rows: term.rows });
+  term.onData((d) => send(d));
+  // when the terminal reflows (rotate, keyboard, window), tell the PTY
+  term.onResize(({ cols, rows }) => sendCtrl({ type: "resize", cols, rows }));
+}
+
+const enc = new TextEncoder();
+// keystrokes / raw bytes → binary frame
+function send(seq) {
+  if (ws && ws.readyState === 1) ws.send(enc.encode(seq));
+}
+// control messages (resize, …) → JSON text frame
+function sendCtrl(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+document.getElementById("back").onclick = closeTerm;
+function closeTerm() {
+  if (ws) { ws.close(); ws = null; }
+  if (term) { term.dispose(); term = null; }
+  termView.classList.add("hidden");
+  listView.classList.remove("hidden");
+  currentId = null;
+  pollTimer = setInterval(poll, 1500);
+  poll();
+}
+
+document.getElementById("kill").onclick = async () => {
+  if (!currentId || !confirm("Kill this agent?")) return;
+  await fetch("/api/kill/" + encodeURIComponent(currentId) + q(), { method: "POST" });
+  closeTerm();
+};
+
+// Scroll the terminal by `notches` wheel steps, mode-aware:
+//  - full-screen app (alternate buffer, e.g. Claude's TUI): emit the SGR
+//    mouse-wheel sequences it interprets to scroll its transcript.
+//  - normal screen: scroll xterm's own scrollback locally.
+// dir: -1 = up/older, +1 = down/newer.
+function scrollTerm(dir, notches) {
+  if (!term) return;
+  // Only emit mouse-wheel sequences when the app is actually tracking the mouse
+  // (e.g. Claude showing its transcript). Otherwise those bytes would be typed
+  // into the app's input as garbage — so fall back to local scrollback instead.
+  const mouseOn = term.modes && term.modes.mouseTrackingMode && term.modes.mouseTrackingMode !== "none";
+  if (mouseOn) {
+    const code = dir < 0 ? 64 : 65; // 64 = wheel up, 65 = wheel down
+    const x = Math.max(1, Math.floor(term.cols / 2));
+    const y = Math.max(1, Math.floor(term.rows / 2));
+    let seq = "";
+    for (let i = 0; i < notches; i++) seq += "\x1b[<" + code + ";" + x + ";" + y + "M";
+    send(seq);
+  } else {
+    term.scrollLines(dir * notches);
+  }
+}
+
+// Button taps scroll a few lines at once.
+function wheel(dir) { scrollTerm(dir, 3); }
+
+// Tactile finger-drag scrolling: translate vertical drag into wheel notches.
+// Dragging down (finger moves down) reveals older output; dragging up, newer.
+function attachSwipe(el) {
+  let lastY = null, acc = 0, active = false;
+  const STEP = 10; // px of drag per wheel notch (smaller = faster scroll)
+  el.addEventListener("touchstart", (e) => {
+    active = e.touches.length === 1;
+    if (active) { lastY = e.touches[0].clientY; acc = 0; }
+  }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    if (!active || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    acc += y - lastY;
+    lastY = y;
+    let moved = false;
+    while (acc >= STEP) { scrollTerm(-1, 1); acc -= STEP; moved = true; }
+    while (acc <= -STEP) { scrollTerm(1, 1); acc += STEP; moved = true; }
+    if (moved) e.preventDefault();
+  }, { passive: false });
+  el.addEventListener("touchend", () => { active = false; }, { passive: true });
+}
+attachSwipe(document.getElementById("terminal"));
+
+// scroll buttons in the toolbar
+for (const btn of document.querySelectorAll(".key")) {
+  if (btn.dataset.scroll) {
+    const dir = btn.dataset.scroll === "up" ? -1 : 1;
+    btn.onclick = () => wheel(dir);
+  }
+}
+
+// command menu (bottom sheet)
+const cmdMenu = document.getElementById("cmd-menu");
+document.getElementById("menu-btn").onclick = () => cmdMenu.classList.remove("hidden");
+document.getElementById("menu-close").onclick = () => cmdMenu.classList.add("hidden");
+cmdMenu.addEventListener("click", (e) => { if (e.target === cmdMenu) cmdMenu.classList.add("hidden"); });
+for (const btn of document.querySelectorAll(".cmd")) {
+  const seq = JSON.parse('"' + btn.dataset.seq + '"');
+  btn.onclick = () => send(seq); // keep the sheet open so you can tap several
+}
+
+// message input → send text + Enter
+const input = document.getElementById("send-input");
+function sendInput() {
+  const v = input.value;
+  if (v.length) send(v);
+  send("\r");
+  input.value = "";
+}
+document.getElementById("send-btn").onclick = sendInput;
+input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); sendInput(); } });
+
+function refit() { if (fit) { try { fit.fit(); } catch (e) {} } }
+window.addEventListener("resize", refit);
+window.addEventListener("orientationchange", () => setTimeout(refit, 200));
+
+// --- new task --------------------------------------------------------------
+const newView = document.getElementById("new-view");
+document.getElementById("new-btn").onclick = openNew;
+document.getElementById("new-cancel").onclick = () => {
+  newView.classList.add("hidden");
+  listView.classList.remove("hidden");
+};
+
+async function openNew() {
+  document.getElementById("new-error").textContent = "";
+  listView.classList.add("hidden");
+  newView.classList.remove("hidden");
+  const sel = document.getElementById("new-project");
+  sel.innerHTML = "<option>loading…</option>";
+  try {
+    const r = await fetch("/api/projects" + q());
+    if (!r.ok) { document.getElementById("new-error").textContent = "Could not load projects."; sel.innerHTML = ""; return; }
+    const projects = await r.json();
+    sel.innerHTML = "";
+    if (!projects.length) { sel.innerHTML = '<option value="">(no projects found)</option>'; return; }
+    for (const p of projects) {
+      const o = document.createElement("option");
+      o.value = p.path; o.textContent = p.name;
+      sel.appendChild(o);
+    }
+  } catch (e) {
+    document.getElementById("new-error").textContent = "Could not load projects: " + e;
+  }
+}
+
+document.getElementById("new-start").onclick = async () => {
+  const dir = document.getElementById("new-project").value;
+  const name = document.getElementById("new-name").value.trim();
+  const prompt = document.getElementById("new-prompt").value;
+  const errEl = document.getElementById("new-error");
+  errEl.textContent = "";
+  if (!dir) { errEl.textContent = "Pick a project."; return; }
+  if (!name) { errEl.textContent = "Enter a task name."; return; }
+  try {
+    const r = await fetch("/api/spawn" + q(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir, id: name, prompt })
+    });
+    if (!r.ok) { errEl.textContent = "Spawn failed: " + (await r.text()); return; }
+    const { id } = await r.json();
+    document.getElementById("new-name").value = "";
+    document.getElementById("new-prompt").value = "";
+    newView.classList.add("hidden");
+    openTerm({ id, task: name });
+  } catch (e) {
+    errEl.textContent = "Spawn failed: " + e;
+  }
+};
+</script>
+</body>
+</html>

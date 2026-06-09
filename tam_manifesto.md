@@ -124,7 +124,7 @@ tam_worktree::init::run(dir) -> Result<()>
 
 Communication happens over a Unix socket at `$XDG_RUNTIME_DIR/tam/sock`. The client connects, performs a version handshake, then sends JSON-line requests and receives JSON-line responses. Events (state changes, agent exits) are pushed from the daemon as unsolicited messages on the same connection.
 
-When the client sends an `Attach` request, the connection transitions from JSON-line mode to raw byte mode — bidirectional relay between the client's terminal and the agent's PTY. Detach (`ctrl-]`) returns the client to the TUI or exits.
+When the client sends an `Attach` request, the connection transitions from JSON-line mode to raw byte mode — bidirectional relay between the client's terminal and the agent's PTY. Detach (`ctrl-a` then `b`) returns the client to the TUI or exits.
 
 The daemon writes a PID file next to the socket for health checks. The client auto-starts the daemon as a detached background process if the socket is absent.
 
@@ -417,12 +417,12 @@ If the task has no session history, `r` spawns a new agent directly.
 Pressing `enter` on a running task enters attached mode. The full screen is handed to the agent's PTY, with a thin status bar:
 
 ```
-│  tam ▸ feat (claude, 34% ctx, 12m) ─ ctrl-]:detach              │
+│  tam ▸ feat (claude, 34% ctx, 12m) ─ C-a b:detach              │
 ```
 
-`ctrl-]` detaches and returns to the task list. On detach, terminal state is fully reset (alternate screen, mouse modes, keyboard protocols, colors, cursor visibility).
+`ctrl-a` then `b` detaches and returns to the task list. On detach, terminal state is fully reset (alternate screen, mouse modes, keyboard protocols, colors, cursor visibility).
 
-Output from the agent is filtered to strip keyboard protocol escape sequences (Kitty keyboard protocol, xterm modifyOtherKeys). This ensures `ctrl-]` is always recognized as the raw byte `0x1d` regardless of what TUI the agent runs internally.
+Output from the agent is filtered to strip keyboard protocol escape sequences (Kitty keyboard protocol, xterm modifyOtherKeys). This ensures the `ctrl-a` leader is always recognized as the raw byte `0x01` regardless of what TUI the agent runs internally.
 
 ### Real-time updates
 

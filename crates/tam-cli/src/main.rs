@@ -7,6 +7,7 @@ mod cli;
 mod client;
 mod config;
 mod ledger;
+mod serve;
 mod sessions;
 mod task;
 mod tui;
@@ -423,6 +424,16 @@ async fn main() -> Result<()> {
                 }
                 _ => {}
             }
+        }
+
+        Commands::Serve {
+            bind,
+            port,
+            token,
+            slack_webhook,
+            install_service,
+        } => {
+            serve::run(&bind, port, token, slack_webhook, install_service).await?;
         }
 
         Commands::Status => match client::Client::try_connect().await? {

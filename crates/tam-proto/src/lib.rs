@@ -77,6 +77,12 @@ pub enum Request {
     Scrollback {
         id: String,
     },
+    /// Resize an agent's PTY (e.g. when a viewer's terminal changes size).
+    Resize {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
     /// Hook callback from an agent process (e.g. Claude Code hooks).
     HookEvent {
         agent_id: String,

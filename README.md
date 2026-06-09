@@ -41,7 +41,7 @@ tam new fix-auth -w
 # Start an agent and attach to it (full-screen, like tmux)
 tam run fix-auth
 
-# Detach with ctrl-] — the agent keeps running in the background
+# Detach with ctrl-a then b — the agent keeps running in the background
 # Check all tasks at a glance
 tam ps
 
@@ -131,7 +131,7 @@ Running `tam` with no arguments opens the dashboard:
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Keys: `j`/`k` navigate, `enter` attaches, `n` creates a task, `r` runs an agent, `s` stops, `d` drops, `p` toggles peek (scrollback preview), `/` filters, `q` quits. When attached to an agent, `ctrl-]` detaches and returns to the dashboard.
+Keys: `j`/`k` navigate, `enter` attaches, `n` creates a task, `r` runs an agent, `s` stops, `d` drops, `p` toggles peek (scrollback preview), `/` filters, `q` quits. When attached to an agent, `ctrl-a` then `b` detaches and returns to the dashboard.
 
 Tasks are sorted by repository name, then by status priority (blocked → input → running → idle → stale → gone), then by task name.
 
