@@ -97,46 +97,38 @@
     <div id="terminal"></div>
     <div id="controls">
       <div id="keys">
-        <button class="key" data-scroll="up">⇞ Scroll</button>
-        <button class="key" data-scroll="down">⇟ Scroll</button>
-        <button class="key" id="menu-btn">☰ Keys</button>
+        <button class="key" data-seq="\x1b[D">←</button>
+        <button class="key" data-seq="\x1b[A">↑</button>
+        <button class="key" data-seq="\x1b[B">↓</button>
+        <button class="key" data-seq="\x1b[C">→</button>
+        <button class="key" data-seq="\r">⏎ Enter</button>
+        <button class="key" id="menu-btn">☰ Menu</button>
       </div>
-      <div id="send-row">
-        <input id="send-input" placeholder="Type a message…" autocapitalize="off" autocomplete="off" autocorrect="off" />
-        <button id="send-btn">Send</button>
-      </div>
+      <form id="send-row" autocomplete="off">
+        <input id="send-input" placeholder="Type a message…" enterkeyhint="send" autocapitalize="off" autocomplete="off" autocorrect="off" />
+        <button id="send-btn" type="submit">Send</button>
+      </form>
     </div>
     <div id="cmd-menu" class="hidden">
       <div class="sheet">
         <div class="sheet-head"><span>Commands</span><button class="ghost" id="menu-close">Done</button></div>
+        <div class="cmd-group">Claude</div>
+        <div class="cmd-row">
+          <button class="cmd" data-seq="\x1b[Z" data-close="1">Modes ⇧⇥</button>
+          <button class="cmd" data-seq="/effort\r" data-close="1">Effort</button>
+          <button class="cmd" data-seq="/context\r" data-close="1">Usage</button>
+          <button class="cmd" data-seq="/model\r" data-close="1">Model</button>
+          <button class="cmd" data-seq="/compact\r" data-close="1">Compact</button>
+          <button class="cmd" data-seq="/" data-close="1">/ cmds</button>
+        </div>
         <div class="cmd-group">Keys</div>
         <div class="cmd-row">
           <button class="cmd" data-seq="\r">⏎ Enter</button>
           <button class="cmd" data-seq="\x1b">Esc</button>
           <button class="cmd" data-seq="\x1b\x1b">Esc Esc</button>
-          <button class="cmd" data-seq="\t">⇥ Tab</button>
-          <button class="cmd" data-seq="\x1b[Z">⇧ Tab</button>
-          <button class="cmd" data-seq="\x7f">⌫ Bksp</button>
           <button class="cmd" data-seq="\x1b[A">↑</button>
           <button class="cmd" data-seq="\x1b[B">↓</button>
-          <button class="cmd" data-seq="\x1b[D">←</button>
-          <button class="cmd" data-seq="\x1b[C">→</button>
-        </div>
-        <div class="cmd-group">Control</div>
-        <div class="cmd-row">
           <button class="cmd" data-seq="\x03">Ctrl-C</button>
-          <button class="cmd" data-seq="\x04">Ctrl-D</button>
-          <button class="cmd" data-seq="\x0c">Ctrl-L</button>
-          <button class="cmd" data-seq="\x15">Ctrl-U</button>
-          <button class="cmd" data-seq="\x01">Ctrl-A</button>
-          <button class="cmd" data-seq="\x05">Ctrl-E</button>
-        </div>
-        <div class="cmd-group">Claude triggers</div>
-        <div class="cmd-row">
-          <button class="cmd" data-seq="/">/ cmds</button>
-          <button class="cmd" data-seq="@">@ files</button>
-          <button class="cmd" data-seq="#"># memory</button>
-          <button class="cmd" data-seq="!">! bash</button>
         </div>
         <div class="cmd-group">Quick pick</div>
         <div class="cmd-row">
@@ -346,11 +338,14 @@ function attachSwipe(el) {
 }
 attachSwipe(document.getElementById("terminal"));
 
-// scroll buttons in the toolbar
+// toolbar keys: data-scroll buttons scroll, data-seq buttons send (menu-btn skipped)
 for (const btn of document.querySelectorAll(".key")) {
   if (btn.dataset.scroll) {
     const dir = btn.dataset.scroll === "up" ? -1 : 1;
     btn.onclick = () => wheel(dir);
+  } else if (btn.dataset.seq !== undefined) {
+    const seq = decodeSeq(btn.dataset.seq);
+    btn.onclick = () => send(seq);
   }
 }
 
@@ -359,9 +354,29 @@ const cmdMenu = document.getElementById("cmd-menu");
 document.getElementById("menu-btn").onclick = () => cmdMenu.classList.remove("hidden");
 document.getElementById("menu-close").onclick = () => cmdMenu.classList.add("hidden");
 cmdMenu.addEventListener("click", (e) => { if (e.target === cmdMenu) cmdMenu.classList.add("hidden"); });
+// decode data-seq escapes (\xNN, \r, \n, \t); plain chars pass through.
+// NOTE: JSON.parse can't be used — \x isn't valid JSON and throws, which would
+// kill this loop and every handler defined after it.
+function decodeSeq(s) {
+  return s.replace(/\\x([0-9a-fA-F]{2})|\\r|\\n|\\t/g, (m, hex) =>
+    hex ? String.fromCharCode(parseInt(hex, 16)) : { "\\r": "\r", "\\n": "\n", "\\t": "\t" }[m]
+  );
+}
 for (const btn of document.querySelectorAll(".cmd")) {
-  const seq = JSON.parse('"' + btn.dataset.seq + '"');
-  btn.onclick = () => send(seq); // keep the sheet open so you can tap several
+  const seq = decodeSeq(btn.dataset.seq);
+  btn.onclick = () => {
+    if (seq.endsWith("\r")) {
+      // type the command, then submit after the slash-autocomplete settles,
+      // otherwise Enter gets swallowed by the autocomplete and nothing runs
+      send(seq.slice(0, -1));
+      setTimeout(() => send("\r"), 150);
+    } else {
+      send(seq);
+    }
+    // action commands open a picker/result behind the sheet — dismiss it so you
+    // can see and drive it; plain keys keep the sheet open for repeated taps.
+    if (btn.dataset.close) cmdMenu.classList.add("hidden");
+  };
 }
 
 // message input → send text + Enter
@@ -372,8 +387,8 @@ function sendInput() {
   send("\r");
   input.value = "";
 }
-document.getElementById("send-btn").onclick = sendInput;
-input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); sendInput(); } });
+// form submit fires on the Send button AND on the phone keyboard's return key
+document.getElementById("send-row").addEventListener("submit", (e) => { e.preventDefault(); sendInput(); });
 
 function refit() { if (fit) { try { fit.fit(); } catch (e) {} } }
 window.addEventListener("resize", refit);
