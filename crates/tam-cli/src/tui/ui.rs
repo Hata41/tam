@@ -165,11 +165,16 @@ fn render_table(frame: &mut Frame, area: Rect, tasks: &[&Task], selected: usize)
             } else {
                 Span::styled("✘", Style::new().fg(Color::DarkGray))
             };
+            // mark running agents whose Slack notifications are muted
+            let task_label = match task.agent_info.as_ref() {
+                Some(a) if !a.notify => format!("{} 🔕", task.name),
+                _ => task.name.clone(),
+            };
 
             Row::new([
                 Cell::from(Span::styled(icon, Style::new().fg(color))),
                 Cell::from(task.repo_name.as_str()),
-                Cell::from(task.name.as_str()),
+                Cell::from(task_label),
                 Cell::from(agent),
                 Cell::from(owned),
                 Cell::from(dir),
@@ -218,6 +223,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &mut App) {
                         Span::raw(":attach  "),
                         Span::styled("s", Style::new().bold()),
                         Span::raw(":stop  "),
+                        Span::styled("b", Style::new().bold()),
+                        Span::raw(":notify  "),
                     ]);
                 } else if selected.is_some() {
                     hints.extend([Span::styled(" r", Style::new().bold()), Span::raw(":run  ")]);

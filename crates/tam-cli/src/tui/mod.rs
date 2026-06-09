@@ -35,6 +35,9 @@ enum Action {
     StopAgent {
         name: String,
     },
+    ToggleNotify {
+        name: String,
+    },
     DropTask {
         name: String,
     },
@@ -189,6 +192,11 @@ async fn run_loop(
                 app.set_tasks(build_task_list(client).await?);
                 refresh_peek(client, app).await;
             }
+            Action::ToggleNotify { name } => {
+                toggle_notify(client, app, &name).await?;
+                app.set_tasks(build_task_list(client).await?);
+                refresh_peek(client, app).await;
+            }
             Action::DropTask { name } => {
                 drop_task(client, app, &name).await?;
                 app.set_tasks(build_task_list(client).await?);
@@ -317,6 +325,19 @@ fn handle_normal_key(key: KeyEvent, app: &mut App, config: &Config) -> Action {
             }
         }
         (KeyCode::Char('p'), _) => Action::TogglePeek,
+        (KeyCode::Char('b'), _) => {
+            if let Some(task) = app.selected_task() {
+                if task.agent_info.is_some() {
+                    Action::ToggleNotify {
+                        name: task.name.clone(),
+                    }
+                } else {
+                    Action::None
+                }
+            } else {
+                Action::None
+            }
+        }
         (KeyCode::Char('d'), _) => {
             if let Some(task) = app.selected_task() {
                 app.mode = Mode::ConfirmDropTask {
@@ -842,13 +863,53 @@ fn draw_status_bar(name: &str, provider: &str, cols: u16, rows: u16) {
     let mut out = std::io::stdout();
 
     let bar = format!(" tam > {name} ({provider})");
-    let hint = "C-a b: detach ";
+    let hint = "C-] detach ";
     let padding = (cols as usize).saturating_sub(bar.len() + hint.len());
 
     let _ = write!(out, "\x1b[1;{}r", rows - 1);
     let _ = write!(out, "\x1b[{rows};1H\x1b[7m{bar}{:padding$}{hint}\x1b[m", "");
     let _ = write!(out, "\x1b[1;1H");
     let _ = out.flush();
+}
+
+async fn toggle_notify(client: &mut Client, app: &mut App, name: &str) -> Result<()> {
+    // Flip the current state, read from the agent we already have in the list.
+    let current = app
+        .tasks
+        .iter()
+        .find(|t| t.name == name)
+        .and_then(|t| t.agent_info.as_ref())
+        .map(|a| a.notify);
+    let enabled = match current {
+        Some(n) => !n,
+        None => {
+            app.set_status(
+                format!("No running agent for '{name}'"),
+                Duration::from_secs(3),
+            );
+            return Ok(());
+        }
+    };
+    let resp = client
+        .send(tam_proto::Request::SetNotify {
+            id: name.into(),
+            enabled,
+        })
+        .await?;
+    match resp {
+        tam_proto::Response::Ok => {
+            let state = if enabled { "on" } else { "off" };
+            app.set_status(
+                format!("Notifications {state} for '{name}'"),
+                Duration::from_secs(3),
+            );
+        }
+        tam_proto::Response::Error { message } => {
+            app.set_status(format!("Error: {message}"), Duration::from_secs(5));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn stop_agent(client: &mut Client, app: &mut App, name: &str) -> Result<()> {
