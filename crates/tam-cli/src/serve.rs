@@ -499,6 +499,21 @@ enum ControlMsg {
 
 /// Write a systemd --user service (+ a 0600 env file for the secrets) so
 /// `tam serve` starts on login and restarts on failure.
+/// PATH to bake into the systemd unit. Starts from the install-time PATH
+/// (whatever shell ran `--install-service`) and guarantees ~/.local/bin is on
+/// it, since that's where agent binaries like `claude` commonly live and a
+/// bare systemd --user PATH omits it.
+fn service_path() -> String {
+    let base = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    let local_bin = dirs::home_dir()
+        .map(|h| h.join(".local/bin"))
+        .map(|p| p.display().to_string());
+    match local_bin {
+        Some(lb) if !base.split(':').any(|p| p == lb) => format!("{lb}:{base}"),
+        _ => base,
+    }
+}
+
 fn install_systemd_service(
     bind: &str,
     port: u16,
@@ -522,6 +537,12 @@ fn install_systemd_service(
     std::fs::write(&env_path, env_contents)?;
     std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600))?;
 
+    // A systemd --user service starts with a minimal PATH that omits
+    // ~/.local/bin (and cargo/npm bin dirs), so the daemon it spawns can't
+    // find agent binaries like `claude`. Bake the install-time PATH into the
+    // unit, ensuring ~/.local/bin is present, so spawned agents resolve.
+    let path = service_path();
+
     let unit_dir = config_home.join("systemd/user");
     std::fs::create_dir_all(&unit_dir)?;
     let unit_path = unit_dir.join("tam-serve.service");
@@ -533,6 +554,7 @@ fn install_systemd_service(
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=PATH={path}\n\
          EnvironmentFile={env}\n\
          ExecStart={exe} serve --bind {bind} --port {port}\n\
          Restart=on-failure\n\
