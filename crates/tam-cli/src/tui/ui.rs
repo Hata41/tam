@@ -136,7 +136,6 @@ fn render_table(frame: &mut Frame, area: Rect, tasks: &[&Task], selected: usize)
         Cell::from("REPO"),
         Cell::from("TASK"),
         Cell::from("AGENT"),
-        Cell::from("EFFORT"),
         Cell::from("OWN"),
         Cell::from("DIR"),
         Cell::from("CTX"),
@@ -161,7 +160,6 @@ fn render_table(frame: &mut Frame, area: Rect, tasks: &[&Task], selected: usize)
                 .and_then(|a| a.context_percent)
                 .map(|p| context_display(p))
                 .unwrap_or_else(|| Span::raw(""));
-            let effort = task.effort.as_deref().unwrap_or("-");
             let owned = if task.owned {
                 Span::styled("✔", Style::new().fg(Color::Green))
             } else {
@@ -178,7 +176,6 @@ fn render_table(frame: &mut Frame, area: Rect, tasks: &[&Task], selected: usize)
                 Cell::from(task.repo_name.as_str()),
                 Cell::from(task_label),
                 Cell::from(agent),
-                Cell::from(effort),
                 Cell::from(owned),
                 Cell::from(dir),
                 Cell::from(ctx),
@@ -191,7 +188,6 @@ fn render_table(frame: &mut Frame, area: Rect, tasks: &[&Task], selected: usize)
         Constraint::Length(15), // REPO
         Constraint::Length(15), // TASK
         Constraint::Length(10), // AGENT
-        Constraint::Length(7),  // EFFORT
         Constraint::Length(3),  // OWN
         Constraint::Fill(1),    // DIR
         Constraint::Length(6),  // CTX

@@ -86,15 +86,12 @@ pub struct Task {
     pub run_count: usize,
     pub last_activity: Option<u64>,
     pub git_branch_status: GitBranchStatus,
-    /// Effort level a Claude agent in this dir resolves to (from settings.json).
-    pub effort: Option<String>,
 }
 
 impl Task {
     /// Build a Task from a ledger snapshot and optional daemon agent info.
     pub fn from_snapshot(snapshot: TaskSnapshot, agent_info: Option<AgentInfo>) -> Self {
         let repo_name = compute_repo_name(&snapshot.dir);
-        let effort = resolve_effort(&snapshot.dir);
         Self {
             name: snapshot.name,
             dir: snapshot.dir,
@@ -104,7 +101,6 @@ impl Task {
             run_count: snapshot.run_count,
             last_activity: snapshot.last_activity,
             git_branch_status: GitBranchStatus::Unknown,
-            effort,
         }
     }
 
@@ -163,33 +159,6 @@ fn compute_repo_name(dir: &Path) -> String {
     dir.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
-}
-
-/// Resolve the Claude effort level that applies to a task directory.
-///
-/// Effort is not recorded per-session; it lives as `effortLevel` in
-/// settings.json. We mirror Claude Code's precedence: project-local settings
-/// (`<dir>/.claude/settings.local.json` then `settings.json`) override the user
-/// global (`~/.claude/settings.json`). Returns `None` if no setting is found.
-fn resolve_effort(dir: &Path) -> Option<String> {
-    let mut candidates = vec![
-        dir.join(".claude").join("settings.local.json"),
-        dir.join(".claude").join("settings.json"),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".claude").join("settings.json"));
-    }
-
-    for path in candidates {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(level) = value.get("effortLevel").and_then(|v| v.as_str()) {
-                    return Some(level.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Query git to determine branch status for an owned task.
@@ -316,32 +285,6 @@ mod tests {
         let mut task = Task::from_snapshot(test_snapshot(), None);
         task.git_branch_status = GitBranchStatus::Active;
         assert_eq!(task.status(), TaskStatus::Idle);
-    }
-
-    #[test]
-    fn resolve_effort_prefers_project_local() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let claude = tmp.path().join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::write(claude.join("settings.json"), r#"{"effortLevel":"medium"}"#).unwrap();
-        std::fs::write(
-            claude.join("settings.local.json"),
-            r#"{"effortLevel":"low"}"#,
-        )
-        .unwrap();
-        assert_eq!(resolve_effort(tmp.path()).as_deref(), Some("low"));
-    }
-
-    #[test]
-    fn resolve_effort_none_when_absent() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // No HOME settings guaranteed in tmp; project has no .claude dir.
-        let claude = tmp.path().join(".claude");
-        std::fs::create_dir_all(&claude).unwrap();
-        std::fs::write(claude.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
-        // With a project settings.json lacking effortLevel, it falls through to
-        // HOME; assert it doesn't pick up the bogus key.
-        assert_ne!(resolve_effort(tmp.path()).as_deref(), Some("opus"));
     }
 
     #[test]
