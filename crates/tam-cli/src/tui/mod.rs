@@ -568,7 +568,7 @@ fn start_new_task_flow(app: &mut App, _config: &Config) {
         },
     ];
 
-    // Discover projects using tam-worktree
+    // Discover projects (git repos) and plain folders using tam-worktree.
     if let Ok(wt_config) = tam_worktree::config::load_config() {
         if let Ok(ignore) = tam_worktree::discovery::build_ignore_set(&wt_config.ignore) {
             let root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -580,6 +580,20 @@ fn start_new_task_flow(app: &mut App, _config: &Config) {
                     items.push(PickerItem {
                         display: entry.display_name.clone(),
                         id: entry.path.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+            // Non-git folders — selectable as borrowed tasks (no worktree).
+            if let Ok(dirs) =
+                tam_worktree::discovery::discover_dirs(&root, &ignore, wt_config.max_depth)
+            {
+                for dir in &dirs {
+                    items.push(PickerItem {
+                        display: format!(
+                            "{} (folder)",
+                            ui::shorten_home(&dir.display().to_string())
+                        ),
+                        id: dir.to_string_lossy().into_owned(),
                     });
                 }
             }
@@ -651,10 +665,12 @@ fn handle_picker_enter(app: &mut App, _config: &Config) -> Action {
 
             match std::fs::canonicalize(&dir) {
                 Ok(dir) => {
+                    // Worktrees require a git repo; non-git folders are borrowed.
+                    let is_git = tam_worktree::git::repo_root(&dir).is_ok();
                     app.mode = Mode::NewTaskEnterName {
                         project_dir: dir,
                         name: String::new(),
-                        create_worktree: true,
+                        create_worktree: is_git,
                     };
                     Action::None
                 }
@@ -733,7 +749,7 @@ async fn do_new_task(
 
     if ledger.task_exists(name) {
         app.set_status(
-            format!("Task '{}' already exists", name),
+            format!("Task '{name}' already exists"),
             Duration::from_secs(3),
         );
         return Ok(());

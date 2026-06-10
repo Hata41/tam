@@ -78,6 +78,69 @@ fn discover_recursive(
     Ok(())
 }
 
+/// Recursively discover plain (non-git) directories under `root`.
+///
+/// Like [`discover`], but collects directories that are *not* git projects so
+/// they can be offered as borrowed-task targets. Git projects are skipped
+/// entirely (use [`discover`] for those) and never descended into. Honors the
+/// same `ignore_set` and `max_depth` bounds. The `root` itself is not included.
+///
+/// Returns a sorted list of absolute paths.
+pub fn discover_dirs(root: &Path, ignore_set: &GlobSet, max_depth: usize) -> Result<Vec<PathBuf>> {
+    let root = root.canonicalize()?;
+    let mut results = Vec::new();
+    discover_dirs_recursive(&root, ignore_set, max_depth, 0, &mut results)?;
+    results.sort();
+    Ok(results)
+}
+
+fn discover_dirs_recursive(
+    dir: &Path,
+    ignore_set: &GlobSet,
+    max_depth: usize,
+    current_depth: usize,
+    results: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if current_depth > max_depth {
+        return Ok(());
+    }
+
+    // Git projects are not plain dirs — skip them and don't descend.
+    if dir.join(".git").exists() {
+        return Ok(());
+    }
+
+    // Record this directory (but not the search root itself).
+    if current_depth > 0 {
+        results.push(dir.to_path_buf());
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()), // skip unreadable directories
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if name_str == ".git" || ignore_set.is_match(name_str.as_ref()) {
+            continue;
+        }
+
+        discover_dirs_recursive(&path, ignore_set, max_depth, current_depth + 1, results)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
