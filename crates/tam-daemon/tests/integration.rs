@@ -51,7 +51,7 @@ async fn list_empty() {
     let resp = send(&mut stream, &Request::List).await;
     match resp {
         Response::Agents { agents } => assert!(agents.is_empty()),
-        other => panic!("expected Agents, got {:?}", other),
+        other => panic!("expected Agents, got {other:?}"),
     }
 }
 
@@ -75,7 +75,7 @@ async fn spawn_and_list() {
     .await;
     match &resp {
         Response::Spawned { id } => assert_eq!(id, "test-agent"),
-        other => panic!("expected Spawned, got {:?}", other),
+        other => panic!("expected Spawned, got {other:?}"),
     }
 
     let resp = send(&mut stream, &Request::List).await;
@@ -85,7 +85,7 @@ async fn spawn_and_list() {
             assert_eq!(agents[0].id, "test-agent");
             assert_eq!(agents[0].provider, "sleep");
         }
-        other => panic!("expected Agents, got {:?}", other),
+        other => panic!("expected Agents, got {other:?}"),
     }
 }
 
@@ -110,7 +110,7 @@ async fn spawn_duplicate_id() {
     let resp = send(&mut stream, &req).await;
     match resp {
         Response::Error { message } => assert!(message.contains("already exists")),
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -134,7 +134,7 @@ async fn spawn_invalid_directory() {
     .await;
     match resp {
         Response::Error { message } => assert!(message.contains("directory"), "{}", message),
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -169,7 +169,7 @@ async fn kill_agent() {
     let resp = send(&mut stream, &Request::List).await;
     match resp {
         Response::Agents { agents } => assert!(agents.is_empty()),
-        other => panic!("expected empty Agents, got {:?}", other),
+        other => panic!("expected empty Agents, got {other:?}"),
     }
 }
 
@@ -182,7 +182,7 @@ async fn kill_nonexistent() {
     let resp = send(&mut stream, &Request::Kill { id: "nope".into() }).await;
     match resp {
         Response::Error { message } => assert!(message.contains("not found")),
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -206,7 +206,7 @@ async fn auto_generated_ids() {
     .await;
     match &resp {
         Response::Spawned { id } => assert_eq!(id, "agent-1"),
-        other => panic!("expected Spawned, got {:?}", other),
+        other => panic!("expected Spawned, got {other:?}"),
     }
 
     let resp = send(
@@ -223,7 +223,7 @@ async fn auto_generated_ids() {
     .await;
     match &resp {
         Response::Spawned { id } => assert_eq!(id, "agent-2"),
-        other => panic!("expected Spawned, got {:?}", other),
+        other => panic!("expected Spawned, got {other:?}"),
     }
 }
 
@@ -241,7 +241,7 @@ async fn malformed_json() {
     let resp: Response = serde_json::from_str(line.trim()).unwrap();
     match resp {
         Response::Error { message } => assert!(message.contains("invalid request")),
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -307,7 +307,7 @@ async fn exited_process_is_cleaned_up() {
     let resp = send(&mut stream, &Request::List).await;
     match resp {
         Response::Agents { agents } => assert!(agents.is_empty()),
-        other => panic!("expected empty Agents, got {:?}", other),
+        other => panic!("expected empty Agents, got {other:?}"),
     }
 }
 
@@ -337,7 +337,7 @@ async fn failed_process_is_cleaned_up() {
     let resp = send(&mut stream, &Request::List).await;
     match resp {
         Response::Agents { agents } => assert!(agents.is_empty()),
-        other => panic!("expected empty Agents, got {:?}", other),
+        other => panic!("expected empty Agents, got {other:?}"),
     }
 }
 
@@ -358,7 +358,7 @@ async fn attach_nonexistent_agent() {
     .await;
     match resp {
         Response::Error { message } => assert!(message.contains("not found")),
-        other => panic!("expected Error, got {:?}", other),
+        other => panic!("expected Error, got {other:?}"),
     }
 }
 
@@ -411,7 +411,7 @@ async fn attach_receives_scrollback() {
         .expect("read failed");
 
     let output = String::from_utf8_lossy(&buf[..n]);
-    assert!(output.contains("hello"), "scrollback was: {:?}", output);
+    assert!(output.contains("hello"), "scrollback was: {output:?}");
 }
 
 #[tokio::test]
@@ -483,8 +483,7 @@ async fn attach_relays_input_and_output() {
     let output = String::from_utf8_lossy(&collected);
     assert!(
         output.contains("ping"),
-        "expected 'ping' in output, got: {:?}",
-        output
+        "expected 'ping' in output, got: {output:?}"
     );
 }
 
@@ -516,7 +515,7 @@ async fn generic_agent_transitions_to_idle() {
             assert_eq!(agents.len(), 1);
             assert_eq!(agents[0].state, tam_proto::AgentState::Working);
         }
-        other => panic!("expected Agents, got {:?}", other),
+        other => panic!("expected Agents, got {other:?}"),
     }
 
     // After the generic provider's idle timeout (5s), should be idle
@@ -527,7 +526,7 @@ async fn generic_agent_transitions_to_idle() {
             assert_eq!(agents.len(), 1);
             assert_eq!(agents[0].state, tam_proto::AgentState::Idle);
         }
-        other => panic!("expected Agents, got {:?}", other),
+        other => panic!("expected Agents, got {other:?}"),
     }
 }
 
@@ -615,7 +614,7 @@ async fn hook_event_updates_agent_state() {
     .await;
     match resp {
         Response::Error { message } => assert!(message.contains("unknown hook event")),
-        other => panic!("expected Error for generic provider hook, got {:?}", other),
+        other => panic!("expected Error for generic provider hook, got {other:?}"),
     }
 
     // Hook for nonexistent agent — should return error
@@ -629,7 +628,7 @@ async fn hook_event_updates_agent_state() {
     .await;
     match resp {
         Response::Error { message } => assert!(message.contains("not found")),
-        other => panic!("expected Error for missing agent, got {:?}", other),
+        other => panic!("expected Error for missing agent, got {other:?}"),
     }
 }
 
@@ -661,23 +660,20 @@ async fn spawn_emits_event() {
     let mut line = String::new();
     let mut got_spawn = false;
 
-    match tokio::time::timeout(
+    if let Ok(Ok(_)) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         reader.read_line(&mut line),
     )
     .await
     {
-        Ok(Ok(_)) => {
-            if let Ok(ServerMessage::Event(tam_proto::Event::AgentSpawned { id, info })) =
-                serde_json::from_str::<ServerMessage>(line.trim())
-            {
-                assert_eq!(id, "spawn-evt");
-                assert_eq!(info.id, "spawn-evt");
-                assert_eq!(info.provider, "sleep");
-                got_spawn = true;
-            }
+        if let Ok(ServerMessage::Event(tam_proto::Event::AgentSpawned { id, info })) =
+            serde_json::from_str::<ServerMessage>(line.trim())
+        {
+            assert_eq!(id, "spawn-evt");
+            assert_eq!(info.id, "spawn-evt");
+            assert_eq!(info.provider, "sleep");
+            got_spawn = true;
         }
-        _ => {}
     }
 
     assert!(got_spawn, "expected AgentSpawned event for spawn-evt");
@@ -729,21 +725,18 @@ async fn kill_emits_event() {
     line.clear();
     let mut got_exit = false;
 
-    match tokio::time::timeout(
+    if let Ok(Ok(_)) = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         reader.read_line(&mut line),
     )
     .await
     {
-        Ok(Ok(_)) => {
-            if let Ok(ServerMessage::Event(tam_proto::Event::AgentExited { id, .. })) =
-                serde_json::from_str::<ServerMessage>(line.trim())
-            {
-                assert_eq!(id, "kill-evt");
-                got_exit = true;
-            }
+        if let Ok(ServerMessage::Event(tam_proto::Event::AgentExited { id, .. })) =
+            serde_json::from_str::<ServerMessage>(line.trim())
+        {
+            assert_eq!(id, "kill-evt");
+            got_exit = true;
         }
-        _ => {}
     }
 
     assert!(got_exit, "expected AgentExited event for kill-evt");

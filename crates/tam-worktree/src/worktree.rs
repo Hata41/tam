@@ -17,9 +17,7 @@ pub fn create(name: &str, source: Option<&str>, config: &Config, cwd: &Path) -> 
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let target = config
-        .worktree_root
-        .join(format!("{}--{}", project_name, name));
+    let target = config.worktree_root.join(format!("{project_name}--{name}"));
 
     if target.exists() {
         bail!("worktree directory already exists: {}", target.display());
@@ -77,12 +75,10 @@ pub fn delete(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let target = config
-        .worktree_root
-        .join(format!("{}--{}", project_name, name));
+    let target = config.worktree_root.join(format!("{project_name}--{name}"));
 
     if !target.exists() {
-        bail!("worktree '{}' does not exist", name);
+        bail!("worktree '{name}' does not exist");
     }
 
     {
@@ -98,10 +94,8 @@ pub fn delete(
             }
             Err(e) => {
                 bail!(
-                    "cannot remove worktree '{}': {}\n\
-                     hint: use --force to remove anyway",
-                    name,
-                    e
+                    "cannot remove worktree '{name}': {e}\n\
+                     hint: use --force to remove anyway"
                 );
             }
         }
@@ -112,28 +106,24 @@ pub fn delete(
         let should_delete = if delete_branch {
             true
         } else if io::stderr().is_terminal() && io::stdin().is_terminal() {
-            eprint!("delete local branch '{}'? [y/N] ", name);
+            eprint!("delete local branch '{name}'? [y/N] ");
             io::stderr().flush()?;
             let mut answer = String::new();
             io::stdin().lock().read_line(&mut answer)?;
             matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
         } else {
-            eprintln!(
-                "note: local branch '{}' still exists — pass -b to delete it",
-                name
-            );
+            eprintln!("note: local branch '{name}' still exists — pass -b to delete it");
             false
         };
 
         if should_delete {
             if let Err(e) = git::delete_branch(cwd, name) {
                 eprintln!(
-                    "warning: could not delete branch '{}': {}\n\
-                     hint: if the branch is not fully merged, run: git branch -D {}",
-                    name, e, name
+                    "warning: could not delete branch '{name}': {e}\n\
+                     hint: if the branch is not fully merged, run: git branch -D {name}"
                 );
             } else {
-                eprintln!("deleted branch '{}'", name);
+                eprintln!("deleted branch '{name}'");
             }
         }
     }

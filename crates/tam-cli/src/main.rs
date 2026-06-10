@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
             let mut ledger = Ledger::load()?;
 
             if ledger.task_exists(&name) {
-                anyhow::bail!("task '{}' already exists", name);
+                anyhow::bail!("task '{name}' already exists");
             }
 
             let worktree = worktree || source.is_some();
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
                         client.attach(&id).await?;
                     }
                     tam_proto::Response::Error { message } => {
-                        eprintln!("Error: {}", message);
+                        eprintln!("Error: {message}");
                         std::process::exit(1);
                     }
                     _ => {}
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
             let name = resolve_task_name(name, &ledger)?;
             let task = ledger
                 .find_task(&name)
-                .ok_or_else(|| anyhow::anyhow!("task '{}' not found", name))?;
+                .ok_or_else(|| anyhow::anyhow!("task '{name}' not found"))?;
 
             let agent = agent.unwrap_or_else(|| config.default_agent.clone());
             config::validate_provider(&agent)?;
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
                     client.attach(&id).await?;
                 }
                 tam_proto::Response::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    eprintln!("Error: {message}");
                     std::process::exit(1);
                 }
                 _ => {}
@@ -191,10 +191,10 @@ async fn main() -> Result<()> {
                         exit_code: -1,
                         timestamp: ledger::now(),
                     })?;
-                    println!("Stopped agent in task '{}'", name);
+                    println!("Stopped agent in task '{name}'");
                 }
                 tam_proto::Response::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    eprintln!("Error: {message}");
                     std::process::exit(1);
                 }
                 _ => {}
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
             let mut ledger = Ledger::load()?;
             let task = ledger
                 .find_task(&name)
-                .ok_or_else(|| anyhow::anyhow!("task '{}' not found", name))?;
+                .ok_or_else(|| anyhow::anyhow!("task '{name}' not found"))?;
 
             // Kill agent if running
             if let Ok(mut client) = client::Client::connect().await {
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
                 timestamp: ledger::now(),
             })?;
 
-            println!("Dropped task '{}'", name);
+            println!("Dropped task '{name}'");
         }
 
         Commands::Ps { json } => {
@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
                         .agent_info
                         .as_ref()
                         .and_then(|a| a.context_percent)
-                        .map(|p| format!("{}%", p))
+                        .map(|p| format!("{p}%"))
                         .unwrap_or_else(|| "-".into());
                     println!(
                         "{:<12} {:<15} {:<10} {:>5} {:>5} {:<30} {:>5}",
@@ -363,7 +363,7 @@ async fn main() -> Result<()> {
                 let entries = tam_worktree::pretty::build_pretty_names(&paths);
                 let lines = tam_worktree::pretty::build_tree_output(&entries);
                 for line in &lines {
-                    println!("{}", line);
+                    println!("{line}");
                 }
             }
         }
@@ -390,7 +390,7 @@ async fn main() -> Result<()> {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
-                .map_err(|_| anyhow::anyhow!("finder '{}' not found", finder))?;
+                .map_err(|_| anyhow::anyhow!("finder '{finder}' not found"))?;
 
             let mut stdin = child.stdin.take().unwrap();
             for entry in &entries {
@@ -419,7 +419,7 @@ async fn main() -> Result<()> {
             match resp {
                 tam_proto::Response::Ok => println!("Daemon shutting down."),
                 tam_proto::Response::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    eprintln!("Error: {message}");
                     std::process::exit(1);
                 }
                 _ => {}
@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
                         match agents.iter().find(|a| a.id == name) {
                             Some(a) => !a.notify,
                             None => {
-                                eprintln!("No running agent for task '{}'.", name);
+                                eprintln!("No running agent for task '{name}'.");
                                 std::process::exit(1);
                             }
                         }
@@ -466,7 +466,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 tam_proto::Response::Error { message } => {
-                    eprintln!("Error: {}", message);
+                    eprintln!("Error: {message}");
                     std::process::exit(1);
                 }
                 _ => {}
@@ -566,7 +566,7 @@ fn format_age(timestamp: Option<u64>) -> String {
 fn shorten_home(path: &str) -> String {
     if let Ok(home) = std::env::var("HOME") {
         if let Some(rest) = path.strip_prefix(&home) {
-            return format!("~{}", rest);
+            return format!("~{rest}");
         }
     }
     path.to_string()
@@ -581,7 +581,7 @@ mod tests {
     fn test_shorten_home() {
         assert_eq!(shorten_home("/other/path"), "/other/path");
         if let Ok(home) = std::env::var("HOME") {
-            let input = format!("{}/projects/foo", home);
+            let input = format!("{home}/projects/foo");
             assert_eq!(shorten_home(&input), "~/projects/foo");
         }
     }

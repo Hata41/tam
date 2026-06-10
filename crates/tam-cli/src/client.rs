@@ -90,7 +90,7 @@ impl Client {
         match resp {
             Response::Hello { .. } => Ok(()),
             Response::Error { message } if message.contains("protocol version mismatch") => {
-                anyhow::bail!("{}", message);
+                anyhow::bail!("{message}");
             }
             Response::Error { .. } => {
                 // Old daemon that doesn't understand Hello — suggest restart
@@ -121,7 +121,7 @@ impl Client {
                     Ok(())
                 })
                 .spawn()
-                .with_context(|| format!("failed to start daemon via {:?}", exe))?;
+                .with_context(|| format!("failed to start daemon via {exe:?}"))?;
         }
 
         Ok(())
@@ -181,7 +181,7 @@ impl Client {
         let result = self.attach_relay(id, cols, rows).await;
         restore_terminal(&original);
         reset_terminal_state();
-        eprintln!("[detached from {}]", id);
+        eprintln!("[detached from {id}]");
         result
     }
 
@@ -200,10 +200,10 @@ impl Client {
         match resp {
             Response::Attached => {}
             Response::Error { message } => {
-                anyhow::bail!("{}", message);
+                anyhow::bail!("{message}");
             }
             other => {
-                anyhow::bail!("unexpected response: {:?}", other);
+                anyhow::bail!("unexpected response: {other:?}");
             }
         }
 

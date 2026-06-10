@@ -256,8 +256,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(
             !json.contains("\"id\""),
-            "id:None should be omitted: {}",
-            json
+            "id:None should be omitted: {json}"
         );
     }
 

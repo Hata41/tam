@@ -67,7 +67,7 @@ pub fn fetch(dir: &Path) -> Result<()> {
 pub fn local_branch_exists(dir: &Path, name: &str) -> Result<bool> {
     let result = git(
         dir,
-        &["show-ref", "--verify", &format!("refs/heads/{}", name)],
+        &["show-ref", "--verify", &format!("refs/heads/{name}")],
     );
     Ok(result.is_ok())
 }
@@ -79,7 +79,7 @@ pub fn remote_branch_exists(dir: &Path, name: &str) -> Result<bool> {
         &[
             "show-ref",
             "--verify",
-            &format!("refs/remotes/origin/{}", name),
+            &format!("refs/remotes/origin/{name}"),
         ],
     );
     Ok(result.is_ok())

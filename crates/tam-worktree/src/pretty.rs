@@ -72,7 +72,7 @@ pub fn build_pretty_names(paths: &[PathBuf]) -> Vec<PrettyEntry> {
 
         if is_worktree(path) {
             if let Ok(main_name) = worktree_main_repo_name(path) {
-                let prefix = format!("{}--", main_name);
+                let prefix = format!("{main_name}--");
                 let short_name = if basename.starts_with(&prefix) {
                     basename[prefix.len()..].to_string()
                 } else {
@@ -98,7 +98,7 @@ pub fn build_pretty_names(paths: &[PathBuf]) -> Vec<PrettyEntry> {
         .iter()
         .map(|(path, name, worktree_of, sort_key)| {
             let display = match worktree_of {
-                Some(main_name) => format!("{} @{}", name, main_name),
+                Some(main_name) => format!("{name} @{main_name}"),
                 None => name.clone(),
             };
             PrettyEntry {
@@ -201,7 +201,7 @@ fn shortest_unique_suffixes(paths: &[&Path]) -> Vec<String> {
 /// since the tree structure already shows the parent relationship.
 fn tree_name(entry: &PrettyEntry) -> &str {
     if let Some(ref parent) = entry.worktree_of {
-        let suffix = format!(" @{}", parent);
+        let suffix = format!(" @{parent}");
         entry
             .display_name
             .strip_suffix(&suffix)
@@ -283,7 +283,7 @@ pub fn resolve(pretty_name: &str, paths: &[PathBuf]) -> Result<PathBuf> {
         .collect();
 
     match matches.len() {
-        0 => bail!("no project matches '{}'", pretty_name),
+        0 => bail!("no project matches '{pretty_name}'"),
         1 => Ok(matches[0].path.clone()),
         _ => bail!(
             "ambiguous name '{}' matches {} projects",

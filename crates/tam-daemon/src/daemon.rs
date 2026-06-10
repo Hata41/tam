@@ -272,7 +272,7 @@ async fn handle_connection(
                     Ok(r) => r,
                     Err(e) => {
                         let resp = Response::Error {
-                            message: format!("invalid request: {}", e),
+                            message: format!("invalid request: {e}"),
                         };
                         write_response(&mut writer, &resp).await?;
                         line.clear();
@@ -294,7 +294,7 @@ async fn handle_connection(
                                     agent.viewers(),
                                 ))
                             }
-                            None => Err(format!("agent '{}' not found", id)),
+                            None => Err(format!("agent '{id}' not found")),
                         }
                     };
 
@@ -357,7 +357,7 @@ async fn handle_attach_session(
     // Forward any data buffered during the JSON handshake
     if !buffered.is_empty() {
         nix::unistd::write(&*master, &buffered)
-            .map_err(|e| anyhow::anyhow!("PTY write error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("PTY write error: {e}"))?;
     }
 
     let write_master = master.clone();
@@ -432,10 +432,7 @@ async fn dispatch(request: Request, state: &Arc<Mutex<DaemonState>>) -> Response
         Request::List => handle_list(state).await,
         Request::Kill { id } => handle_kill(state, &id).await,
         Request::Attach { id, .. } => Response::Error {
-            message: format!(
-                "attach for '{}' should be handled by connection handler",
-                id
-            ),
+            message: format!("attach for '{id}' should be handled by connection handler"),
         },
         Request::Scrollback { id } => handle_scrollback(state, &id).await,
         Request::Resize { id, cols, rows } => handle_resize(state, &id, cols, rows).await,
@@ -479,7 +476,7 @@ async fn handle_spawn(
 
     if state.agents.contains_key(&id) {
         return Response::Error {
-            message: format!("agent '{}' already exists", id),
+            message: format!("agent '{id}' already exists"),
         };
     }
 
@@ -509,7 +506,7 @@ async fn handle_spawn(
             Response::Spawned { id }
         }
         Err(e) => Response::Error {
-            message: format!("failed to spawn agent: {}", e),
+            message: format!("failed to spawn agent: {e}"),
         },
     }
 }
@@ -555,7 +552,7 @@ async fn handle_kill(state: &Arc<Mutex<DaemonState>>, id: &str) -> Response {
             Response::Ok
         }
         None => Response::Error {
-            message: format!("agent '{}' not found", id),
+            message: format!("agent '{id}' not found"),
         },
     }
 }
@@ -576,7 +573,7 @@ async fn handle_scrollback(state: &Arc<Mutex<DaemonState>>, id: &str) -> Respons
             }
         }
         None => Response::Error {
-            message: format!("agent '{}' not found", id),
+            message: format!("agent '{id}' not found"),
         },
     }
 }
@@ -594,7 +591,7 @@ async fn handle_resize(
             Response::Ok
         }
         None => Response::Error {
-            message: format!("agent '{}' not found", id),
+            message: format!("agent '{id}' not found"),
         },
     }
 }
@@ -607,7 +604,7 @@ async fn handle_set_notify(state: &Arc<Mutex<DaemonState>>, id: &str, enabled: b
             Response::Ok
         }
         None => Response::Error {
-            message: format!("agent '{}' not found", id),
+            message: format!("agent '{id}' not found"),
         },
     }
 }
@@ -626,11 +623,11 @@ async fn handle_hook_event(
                 Response::Ok
             }
             None => Response::Error {
-                message: format!("unknown hook event '{}' for agent '{}'", event, agent_id),
+                message: format!("unknown hook event '{event}' for agent '{agent_id}'"),
             },
         },
         None => Response::Error {
-            message: format!("agent '{}' not found", agent_id),
+            message: format!("agent '{agent_id}' not found"),
         },
     }
 }

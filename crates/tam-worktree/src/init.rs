@@ -127,13 +127,13 @@ fn copy_include_files(source: &Path, target: &Path, patterns: &[String]) -> Resu
 /// Run commands sequentially in the target directory. Stops on first failure.
 fn run_commands(target: &Path, commands: &[String]) -> Result<()> {
     for cmd in commands {
-        eprintln!("running: {}", cmd);
+        eprintln!("running: {cmd}");
         let status = Command::new("sh")
             .arg("-c")
             .arg(cmd)
             .current_dir(target)
             .status()
-            .with_context(|| format!("failed to run: {}", cmd))?;
+            .with_context(|| format!("failed to run: {cmd}"))?;
         if !status.success() {
             bail!(
                 "command failed (exit {}): {}",
