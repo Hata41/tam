@@ -33,6 +33,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::client::Client;
+use crate::ledger::{self, Ledger, LedgerEvent};
 
 #[derive(Clone)]
 struct AppState {
@@ -383,20 +384,76 @@ async fn spawn_agent(
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let provider = body.provider.unwrap_or_else(default_provider);
+    let dir = PathBuf::from(&body.dir);
+
+    // Pre-trust the directory before launching so a brand-new folder (e.g. a
+    // just-created worktree) doesn't stall the agent at its first-run "trust
+    // this folder?" prompt, which fires before state hooks and would leave us
+    // blind to it waiting. The daemon does this too; doing it here as well
+    // covers the case where this bridge is a newer build than the running
+    // daemon. Best-effort — never block a spawn on it.
+    if let Err(e) = tam_daemon::provider::resolve(&provider).ensure_dir_trusted(&dir) {
+        eprintln!("Warning: could not pre-trust {}: {e}", dir.display());
+    }
+
     let req = Request::Spawn {
-        provider,
-        dir: PathBuf::from(body.dir),
+        provider: provider.clone(),
+        dir: dir.clone(),
         id: Some(body.id),
         args: vec![],
         resume_session: None,
         prompt: body.prompt.filter(|p| !p.is_empty()),
     };
     match daemon_request(req).await {
-        Ok(Response::Spawned { id }) => Json(serde_json::json!({ "id": id })).into_response(),
+        Ok(Response::Spawned { id }) => {
+            // Record it in the ledger so a session started from the phone is a
+            // first-class task — visible in `tam ps` and the TUI on the
+            // computer too, not just in the live daemon agent list here.
+            // Best-effort: the agent is already running, so a ledger hiccup
+            // must not turn a success into an error.
+            match Ledger::load() {
+                Ok(mut ledger) => {
+                    if let Err(e) = record_spawn(&mut ledger, &id, &dir, &provider) {
+                        eprintln!(
+                            "Warning: spawned '{id}' but failed to record it in the ledger: {e}"
+                        );
+                    }
+                }
+                Err(e) => eprintln!("Warning: spawned '{id}' but could not open the ledger: {e}"),
+            }
+            Json(serde_json::json!({ "id": id })).into_response()
+        }
         Ok(Response::Error { message }) => (StatusCode::BAD_GATEWAY, message).into_response(),
         Ok(_) => (StatusCode::BAD_GATEWAY, "unexpected daemon response").into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     }
+}
+
+/// Append the ledger events that make an API-spawned agent a first-class task:
+/// a `TaskCreated` (only if the name is new) plus an `AgentRunStarted`. A
+/// directory the bridge was merely pointed at is *borrowed* (tam didn't create
+/// it), so the task is recorded `owned: false` and `tam drop` won't delete it.
+fn record_spawn(
+    ledger: &mut Ledger,
+    id: &str,
+    dir: &std::path::Path,
+    provider: &str,
+) -> Result<()> {
+    if !ledger.task_exists(id) {
+        ledger.append(LedgerEvent::TaskCreated {
+            name: id.to_string(),
+            dir: dir.to_path_buf(),
+            owned: false,
+            timestamp: ledger::now(),
+        })?;
+    }
+    ledger.append(LedgerEvent::AgentRunStarted {
+        task: id.to_string(),
+        provider: provider.to_string(),
+        session_id: None,
+        timestamp: ledger::now(),
+    })?;
+    Ok(())
 }
 
 /// The configured default agent, falling back to "claude".
@@ -671,5 +728,65 @@ mod tests {
         let resolved = resolve_bind("auto");
         assert_ne!(resolved, "0.0.0.0");
         assert!(!resolved.is_empty());
+    }
+
+    #[test]
+    fn record_spawn_makes_a_first_class_task() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ledger.jsonl");
+
+        let mut ledger = Ledger::load_from(path.clone()).unwrap();
+        record_spawn(
+            &mut ledger,
+            "phone-sess",
+            std::path::Path::new("/tmp/proj"),
+            "claude",
+        )
+        .unwrap();
+
+        // Reload from disk: a phone-spawned agent is now a visible, borrowed
+        // task with one recorded run — exactly what `tam ps`/the TUI list.
+        let ledger = Ledger::load_from(path).unwrap();
+        let task = ledger
+            .active_tasks()
+            .into_iter()
+            .find(|t| t.name == "phone-sess")
+            .expect("phone-spawned session should appear as a task");
+        assert_eq!(task.dir, std::path::Path::new("/tmp/proj"));
+        assert!(!task.owned);
+        assert_eq!(task.run_count, 1);
+    }
+
+    #[test]
+    fn record_spawn_is_idempotent_on_task_creation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ledger.jsonl");
+
+        let mut ledger = Ledger::load_from(path.clone()).unwrap();
+        // Two spawns of the same id (e.g. resumed from the phone) → one task,
+        // two runs, not a duplicate task.
+        record_spawn(
+            &mut ledger,
+            "sess",
+            std::path::Path::new("/tmp/p"),
+            "claude",
+        )
+        .unwrap();
+        record_spawn(
+            &mut ledger,
+            "sess",
+            std::path::Path::new("/tmp/p"),
+            "claude",
+        )
+        .unwrap();
+
+        let ledger = Ledger::load_from(path).unwrap();
+        let tasks: Vec<_> = ledger
+            .active_tasks()
+            .into_iter()
+            .filter(|t| t.name == "sess")
+            .collect();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].run_count, 2);
     }
 }

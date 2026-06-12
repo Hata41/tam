@@ -500,6 +500,15 @@ async fn handle_spawn(
         Err(e) => warn!(provider = %provider, error = %e, "failed to set up state-detection hooks"),
     }
 
+    // Pre-trust the working directory so the agent starts immediately instead
+    // of stalling at a first-run "trust this folder?" prompt (which fires
+    // before hooks, so we'd never learn it's waiting). Idempotent, non-fatal.
+    match resolved.ensure_dir_trusted(&dir) {
+        Ok(true) => info!(provider = %provider, dir = %dir.display(), "marked directory trusted"),
+        Ok(false) => {}
+        Err(e) => warn!(provider = %provider, error = %e, "failed to mark directory trusted"),
+    }
+
     match Agent::spawn(
         resolved,
         &dir,
