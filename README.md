@@ -138,9 +138,66 @@ Tasks are sorted by repository name, then by status priority (blocked → input 
 ### Setup
 
 ```
-tam init --agent claude        Configure Claude Code hooks
+tam init --agent claude        Configure Claude Code hooks (optional — see below)
 tam shutdown                   Stop all agents and kill the daemon
 tam status                     Check if the daemon is running
+```
+
+`tam init` is optional: the daemon installs the Claude state-detection hooks
+automatically before the first spawn, so notifications work out of the box.
+Run it yourself only if you want the hooks in place ahead of time.
+
+## Remote access (`tam serve`)
+
+`tam serve` exposes the daemon over HTTP + WebSocket so you can list, spawn,
+attach to (view *and* drive), and kill agents from a browser — typically your
+phone. It connects to the same Unix socket as the CLI and re-exposes the
+protocol; all network-facing code lives in this one bridge, leaving the daemon
+untouched.
+
+```
+tam serve                      Run the bridge (binds your Tailscale IP)
+tam serve --port 9000          Use a different port (default 8765)
+tam serve --install-service    Install a systemd --user service (auto-start on login)
+```
+
+On startup it prints the access URL (`http://<tailscale-ip>:<port>/?token=…`);
+open it once on your phone and "Add to Home Screen". With a Slack Incoming
+Webhook configured (`--slack-webhook` or `TAM_SLACK_WEBHOOK`) it posts that link
+on startup and pings you when an agent needs you — `blocked` (permission prompt)
+or `input` (finished, awaiting a prompt) — subject to each agent's per-session
+bell toggle.
+
+### Security model
+
+The bridge is **safe by default** because it is designed to live entirely on
+your [Tailscale](https://tailscale.com) tailnet, with the token as a second
+layer:
+
+- **Tailnet-only by default.** `--bind` defaults to `auto`, which binds your
+  Tailscale IP (falling back to `127.0.0.1` if Tailscale isn't up) — **never**
+  all interfaces. So only devices signed into *your* Tailscale account can reach
+  it; your LAN, Docker bridges, and other VPNs cannot. Any device with Tailscale
+  works from anywhere (home wifi, cellular, abroad).
+- **Encryption comes from Tailscale.** The bridge speaks plain HTTP/WebSocket —
+  it has **no TLS and no SSH of its own**. Transport encryption and device
+  authentication are provided by Tailscale's WireGuard tunnel. This is why the
+  default bind keeps it on the tailnet.
+- **Bearer token.** Every request needs a 128-bit random token (`?token=…`),
+  generated from `/dev/urandom` on first run. It's stored in
+  `~/.config/tam/serve.env` with `0600` permissions and injected via the systemd
+  unit's `EnvironmentFile`, never written into the unit itself. It's defense in
+  depth on top of the tailnet, and is stable across restarts.
+- **Slack webhook is outbound-only.** tam *posts to* Slack; nothing inbound. The
+  webhook URL is a secret kept in the same `0600` env file.
+
+**Exposing it more broadly** (e.g. `--bind 0.0.0.0`) is an explicit, deliberate
+choice. Don't do it on an untrusted network without your own TLS and
+authentication in front — over plain HTTP the token travels in the URL and can
+be sniffed or logged. To confirm what the bridge is actually bound to:
+
+```
+ss -tlnp | grep 8765           # should show <tailscale-ip>:8765, not 0.0.0.0
 ```
 
 ## Configuration
