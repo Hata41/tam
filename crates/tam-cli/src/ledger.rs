@@ -153,6 +153,9 @@ impl Ledger {
                             last_activity: Some(*timestamp),
                         },
                     );
+                    // Re-creating a name supersedes any earlier drop of it, so a
+                    // task that was dropped and later created again stays active.
+                    dropped.remove(name);
                 }
                 LedgerEvent::AgentRunStarted {
                     task, timestamp, ..
@@ -281,6 +284,41 @@ mod tests {
             .unwrap();
 
         assert!(ledger.active_tasks().is_empty());
+    }
+
+    #[test]
+    fn recreating_a_dropped_name_keeps_it_active() {
+        let tmp = TempDir::new().unwrap();
+        let mut ledger = test_ledger(&tmp);
+        // First incarnation, then dropped.
+        ledger
+            .append(LedgerEvent::TaskCreated {
+                name: "feat".into(),
+                dir: PathBuf::from("/tmp/old"),
+                owned: false,
+                timestamp: now(),
+            })
+            .unwrap();
+        ledger
+            .append(LedgerEvent::TaskDropped {
+                task: "feat".into(),
+                timestamp: now(),
+            })
+            .unwrap();
+        // Re-created later (possibly in a different dir) — must reappear.
+        ledger
+            .append(LedgerEvent::TaskCreated {
+                name: "feat".into(),
+                dir: PathBuf::from("/tmp/new"),
+                owned: false,
+                timestamp: now(),
+            })
+            .unwrap();
+
+        let tasks = ledger.active_tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "feat");
+        assert_eq!(tasks[0].dir, PathBuf::from("/tmp/new"));
     }
 
     #[test]
