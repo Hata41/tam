@@ -299,123 +299,16 @@ pub fn validate_provider(name: &str) -> anyhow::Result<()> {
 }
 
 pub fn init_agent_hooks(agent: &str) -> Result<()> {
-    match agent {
-        "claude" => init_claude_hooks(),
-        _ => anyhow::bail!("init not supported for agent '{agent}'"),
-    }
-}
-
-fn init_claude_hooks() -> Result<()> {
-    let settings_path = dirs::home_dir()
-        .context("cannot determine home directory")?
-        .join(".claude")
-        .join("settings.json");
-
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)
-            .with_context(|| format!("failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse {}", settings_path.display()))?
+    // Same idempotent installer the daemon runs automatically before each
+    // spawn — `tam init` just lets you set it up ahead of time and see what
+    // changed.
+    let added = tam_daemon::provider::resolve(agent).ensure_state_hooks()?;
+    if added.is_empty() {
+        println!("State-detection hooks already configured for '{agent}'.");
     } else {
-        serde_json::json!({})
-    };
-
-    let hooks = settings
-        .as_object_mut()
-        .context("settings.json is not an object")?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-
-    let hooks = hooks.as_object_mut().context("hooks is not an object")?;
-
-    let tam_hooks: &[(&str, Option<&str>, &str)] = &[
-        ("UserPromptSubmit", None, "user_prompt_submit"),
-        ("Stop", None, "stop"),
-        (
-            "Notification",
-            Some("idle_prompt"),
-            "notification:idle_prompt",
-        ),
-        (
-            "Notification",
-            Some("permission_prompt"),
-            "notification:permission_prompt",
-        ),
-    ];
-
-    let mut added = Vec::new();
-    let mut skipped = Vec::new();
-
-    for &(event, matcher, tam_event) in tam_hooks {
-        let hook_entry = make_hook_entry(matcher, tam_event);
-
-        let event_hooks = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
-
-        let arr = event_hooks
-            .as_array_mut()
-            .with_context(|| format!("hooks.{event} is not an array"))?;
-
-        // Check if tam or zinc hook already exists for this event+matcher
-        if arr.iter().any(|entry| entry_matches_hook(entry, tam_event)) {
-            skipped.push(format!(
-                "{event}{}",
-                matcher.map(|m| format!("({m})")).unwrap_or_default()
-            ));
-        } else {
-            arr.push(hook_entry);
-            added.push(format!(
-                "{event}{}",
-                matcher.map(|m| format!("({m})")).unwrap_or_default()
-            ));
-        }
-    }
-
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let formatted = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&settings_path, formatted.as_bytes())
-        .with_context(|| format!("failed to write {}", settings_path.display()))?;
-
-    if !added.is_empty() {
         println!("Added hooks: {}", added.join(", "));
     }
-    if !skipped.is_empty() {
-        println!("Already configured: {}", skipped.join(", "));
-    }
-    println!("Wrote {}", settings_path.display());
-
     Ok(())
-}
-
-fn make_hook_entry(matcher: Option<&str>, tam_event: &str) -> serde_json::Value {
-    let hook = serde_json::json!({
-        "type": "command",
-        "command": format!("tam hook-notify --event {tam_event}"),
-        "timeout": 5
-    });
-
-    let mut entry = serde_json::Map::new();
-    if let Some(m) = matcher {
-        entry.insert("matcher".into(), serde_json::Value::String(m.into()));
-    }
-    entry.insert("hooks".into(), serde_json::json!([hook]));
-    serde_json::Value::Object(entry)
-}
-
-/// Check if a hook entry already contains a tam or zinc hook-notify command.
-fn entry_matches_hook(entry: &serde_json::Value, event: &str) -> bool {
-    let tam_cmd = format!("tam hook-notify --event {event}");
-    let zinc_cmd = format!("zinc hook-notify --event {event}");
-    entry["hooks"]
-        .as_array()
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                let cmd = h["command"].as_str().unwrap_or("");
-                cmd == tam_cmd || cmd == zinc_cmd
-            })
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -514,21 +407,5 @@ finder = "fzf"
         let mut writer = Vec::new();
         let result = pick_session_fallback(&mut reader, &mut writer, &sessions).unwrap();
         assert_eq!(result.as_deref(), Some("sess-1"));
-    }
-
-    #[test]
-    fn entry_matches_tam_hook() {
-        let entry = serde_json::json!({
-            "hooks": [{"type": "command", "command": "tam hook-notify --event stop"}]
-        });
-        assert!(entry_matches_hook(&entry, "stop"));
-    }
-
-    #[test]
-    fn entry_matches_zinc_hook_migration() {
-        let entry = serde_json::json!({
-            "hooks": [{"type": "command", "command": "zinc hook-notify --event stop"}]
-        });
-        assert!(entry_matches_hook(&entry, "stop"));
     }
 }

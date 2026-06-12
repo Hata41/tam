@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use anyhow::Context;
 use tam_proto::AgentState;
 
 /// Context window usage for an agent.
@@ -54,6 +55,15 @@ pub trait Provider: Send + Sync {
     /// or if the data isn't available.
     fn context_usage(&self, _pid: u32, _dir: &Path) -> Option<ContextUsage> {
         None
+    }
+
+    /// Idempotently install whatever this provider needs for state detection
+    /// (e.g. Claude's hooks). Called automatically before every spawn so a
+    /// fresh machine works without a manual `tam init`. Returns the labels of
+    /// anything newly added; an empty list means it was already set up or the
+    /// provider needs no setup. The default is a no-op.
+    fn ensure_state_hooks(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 
@@ -111,6 +121,118 @@ impl Provider for ClaudeProvider {
     fn context_usage(&self, pid: u32, dir: &Path) -> Option<ContextUsage> {
         claude_context_usage(pid, dir)
     }
+
+    fn ensure_state_hooks(&self) -> anyhow::Result<Vec<String>> {
+        let settings_path = dirs::home_dir()
+            .context("cannot determine home directory")?
+            .join(".claude")
+            .join("settings.json");
+        ensure_claude_hooks_at(&settings_path)
+    }
+}
+
+// --- Claude state-detection hooks ---
+
+/// The Claude Code hooks tam installs to drive state detection, as
+/// `(claude-code event, optional matcher, tam hook-notify event name)`.
+const CLAUDE_STATE_HOOKS: &[(&str, Option<&str>, &str)] = &[
+    ("UserPromptSubmit", None, "user_prompt_submit"),
+    ("Stop", None, "stop"),
+    (
+        "Notification",
+        Some("idle_prompt"),
+        "notification:idle_prompt",
+    ),
+    (
+        "Notification",
+        Some("permission_prompt"),
+        "notification:permission_prompt",
+    ),
+];
+
+/// Idempotently add tam's state-detection hooks to a Claude `settings.json`.
+///
+/// Appends alongside any hooks already present (the user's own hooks are left
+/// untouched), skips hooks tam — or its predecessor zinc — already installed,
+/// and writes the file back only when something actually changed. Returns the
+/// labels of hooks newly added.
+pub fn ensure_claude_hooks_at(settings_path: &Path) -> anyhow::Result<Vec<String>> {
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(settings_path)
+            .with_context(|| format!("failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse {}", settings_path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+
+    let hooks = settings
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks is not an object")?;
+
+    let mut added = Vec::new();
+    for &(event, matcher, tam_event) in CLAUDE_STATE_HOOKS {
+        let arr = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} is not an array"))?;
+
+        if arr.iter().any(|e| entry_matches_hook(e, tam_event)) {
+            continue;
+        }
+        arr.push(make_hook_entry(matcher, tam_event));
+        added.push(match matcher {
+            Some(m) => format!("{event}({m})"),
+            None => event.to_string(),
+        });
+    }
+
+    if !added.is_empty() {
+        if let Some(parent) = settings_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let formatted = serde_json::to_string_pretty(&settings)?;
+        std::fs::write(settings_path, formatted.as_bytes())
+            .with_context(|| format!("failed to write {}", settings_path.display()))?;
+    }
+
+    Ok(added)
+}
+
+fn make_hook_entry(matcher: Option<&str>, tam_event: &str) -> serde_json::Value {
+    let hook = serde_json::json!({
+        "type": "command",
+        "command": format!("tam hook-notify --event {tam_event}"),
+        "timeout": 5
+    });
+
+    let mut entry = serde_json::Map::new();
+    if let Some(m) = matcher {
+        entry.insert("matcher".into(), serde_json::Value::String(m.into()));
+    }
+    entry.insert("hooks".into(), serde_json::json!([hook]));
+    serde_json::Value::Object(entry)
+}
+
+/// Whether a hook entry already contains a tam (or legacy zinc) hook-notify
+/// command for `event`.
+fn entry_matches_hook(entry: &serde_json::Value, event: &str) -> bool {
+    let tam_cmd = format!("tam hook-notify --event {event}");
+    let zinc_cmd = format!("zinc hook-notify --event {event}");
+    entry["hooks"]
+        .as_array()
+        .map(|hooks| {
+            hooks.iter().any(|h| {
+                let cmd = h["command"].as_str().unwrap_or("");
+                cmd == tam_cmd || cmd == zinc_cmd
+            })
+        })
+        .unwrap_or(false)
 }
 
 // --- Claude context usage parsing ---
@@ -475,6 +597,90 @@ pub fn resolve(name: &str) -> Box<dyn Provider> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ensure_hooks_writes_all_four_to_fresh_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".claude/settings.json");
+
+        let added = ensure_claude_hooks_at(&path).unwrap();
+        assert_eq!(added.len(), 4);
+        assert!(path.exists());
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // permission_prompt hook must be present and point at hook-notify.
+        let notif = settings["hooks"]["Notification"].as_array().unwrap();
+        assert!(notif.iter().any(|e| {
+            e["matcher"] == "permission_prompt"
+                && entry_matches_hook(e, "notification:permission_prompt")
+        }));
+    }
+
+    #[test]
+    fn ensure_hooks_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+
+        assert_eq!(ensure_claude_hooks_at(&path).unwrap().len(), 4);
+        let after_first = std::fs::read_to_string(&path).unwrap();
+
+        // Second run adds nothing and leaves the file byte-for-byte identical.
+        assert!(ensure_claude_hooks_at(&path).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after_first);
+    }
+
+    #[test]
+    fn ensure_hooks_preserves_existing_user_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        // A pre-existing, unrelated Stop hook (e.g. a config-sync script).
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": { "Stop": [
+                    { "hooks": [{ "type": "command", "command": "my-sync.sh" }] }
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let added = ensure_claude_hooks_at(&path).unwrap();
+        assert_eq!(added.len(), 4);
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stop = settings["hooks"]["Stop"].as_array().unwrap();
+        // The user's hook survives alongside the newly-added tam Stop hook.
+        assert_eq!(stop.len(), 2);
+        assert!(stop
+            .iter()
+            .any(|e| e["hooks"][0]["command"] == "my-sync.sh"));
+        assert!(stop.iter().any(|e| entry_matches_hook(e, "stop")));
+    }
+
+    #[test]
+    fn entry_matches_tam_and_zinc_hooks() {
+        for cmd in [
+            "tam hook-notify --event stop",
+            "zinc hook-notify --event stop",
+        ] {
+            let entry = serde_json::json!({
+                "hooks": [{"type": "command", "command": cmd}]
+            });
+            assert!(entry_matches_hook(&entry, "stop"));
+        }
+    }
+
+    #[test]
+    fn generic_provider_needs_no_hooks() {
+        assert!(GenericProvider::new("codex")
+            .ensure_state_hooks()
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn claude_provider_basics() {

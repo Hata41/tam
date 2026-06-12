@@ -10,7 +10,7 @@ use tam_proto::{AgentState, Event, Request, Response};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, Mutex};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::agent::Agent;
 use crate::notify::{self, NotifyConfig};
@@ -486,7 +486,20 @@ async fn handle_spawn(
         ("TAM_SOCKET", socket_path.as_str()),
     ];
 
-    let resolved = Arc::from(provider::resolve(&provider));
+    let resolved: Arc<dyn provider::Provider> = Arc::from(provider::resolve(&provider));
+
+    // Make sure this provider's state-detection plumbing is in place before we
+    // launch, so notifications work on a fresh machine without a manual
+    // `tam init`. Idempotent and non-fatal — a setup failure shouldn't block
+    // the spawn.
+    match resolved.ensure_state_hooks() {
+        Ok(added) if !added.is_empty() => {
+            info!(provider = %provider, hooks = ?added, "installed agent state-detection hooks");
+        }
+        Ok(_) => {}
+        Err(e) => warn!(provider = %provider, error = %e, "failed to set up state-detection hooks"),
+    }
+
     match Agent::spawn(
         resolved,
         &dir,
