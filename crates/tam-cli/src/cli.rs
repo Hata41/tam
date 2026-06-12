@@ -130,8 +130,10 @@ pub enum Commands {
 
     /// Serve a web UI for remote access (e.g. from a phone over Tailscale)
     Serve {
-        /// Address to bind. Default 0.0.0.0 so your Tailscale IP is reachable.
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Address to bind. Default "auto" binds your Tailscale IP (falling
+        /// back to 127.0.0.1), so the bridge stays on the tailnet. Pass an
+        /// explicit address like 0.0.0.0 to expose it on all interfaces.
+        #[arg(long, default_value = "auto")]
         bind: String,
 
         /// Port to listen on

@@ -67,8 +67,13 @@ pub async fn run(
 ) -> Result<()> {
     let token = token.unwrap_or_else(generate_token);
 
+    // Resolve "auto" to a concrete, safe address up front so both the live
+    // server and the systemd unit we install bind the same thing — never all
+    // interfaces unless the user explicitly asked for it.
+    let bind = resolve_bind(bind);
+
     if install_service {
-        return install_systemd_service(bind, port, &token, slack_webhook.as_deref());
+        return install_systemd_service(&bind, port, &token, slack_webhook.as_deref());
     }
 
     // Make sure the daemon is up, then keep one connection open for the lifetime
@@ -198,21 +203,54 @@ fn generate_token() -> String {
     }
 }
 
-/// Best-effort list of URLs to reach the bridge. Prefers the Tailscale IP.
-fn access_urls(port: u16, token: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    if let Ok(out) = std::process::Command::new("tailscale")
+/// This machine's Tailscale IPv4 address(es), or empty if Tailscale isn't
+/// installed / not up.
+fn tailscale_ipv4s() -> Vec<String> {
+    let out = match std::process::Command::new("tailscale")
         .args(["ip", "-4"])
         .output()
     {
-        if out.status.success() {
-            if let Ok(text) = String::from_utf8(out.stdout) {
-                for ip in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                    urls.push(format!("http://{ip}:{port}/?token={token}"));
-                }
-            }
+        Ok(out) if out.status.success() => out,
+        _ => return Vec::new(),
+    };
+    String::from_utf8(out.stdout)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve the requested bind address to a concrete one.
+///
+/// The default, `"auto"`, prefers the Tailscale IP and falls back to loopback —
+/// so the bridge is never reachable beyond the tailnet unless the user passes
+/// an explicit address (e.g. `0.0.0.0`). Any explicit value is used verbatim.
+fn resolve_bind(requested: &str) -> String {
+    if requested != "auto" {
+        return requested.to_string();
+    }
+    match tailscale_ipv4s().into_iter().next() {
+        Some(ip) => ip,
+        None => {
+            eprintln!(
+                "Warning: no Tailscale IP found; binding to 127.0.0.1 (local only). \
+                 Pass --bind <addr> to expose it elsewhere."
+            );
+            "127.0.0.1".to_string()
         }
     }
+}
+
+/// Best-effort list of URLs to reach the bridge. Prefers the Tailscale IP.
+fn access_urls(port: u16, token: &str) -> Vec<String> {
+    let mut urls: Vec<String> = tailscale_ipv4s()
+        .into_iter()
+        .map(|ip| format!("http://{ip}:{port}/?token={token}"))
+        .collect();
     if urls.is_empty() {
         urls.push(format!("http://<this-machine>:{port}/?token={token}"));
     }
@@ -551,6 +589,10 @@ fn install_systemd_service(
          Description=tam serve — remote web bridge\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
+         # Bind is pinned to a concrete IP (the Tailscale address by default);\n\
+         # if tailscaled assigns it after this service first starts, the bind\n\
+         # fails, so keep retrying instead of tripping the default start-limit.\n\
+         StartLimitIntervalSec=0\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -609,3 +651,25 @@ const MANIFEST_JSON: &str = r##"{
 }"##;
 
 const INDEX_HTML: &str = include_str!("serve_index.html");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_bind_is_passed_through() {
+        // An explicit address — including the deliberately-unsafe one — is honored.
+        assert_eq!(resolve_bind("0.0.0.0"), "0.0.0.0");
+        assert_eq!(resolve_bind("192.168.1.5"), "192.168.1.5");
+        assert_eq!(resolve_bind("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn auto_never_binds_all_interfaces() {
+        // The default must resolve to a tailnet/loopback address — never the
+        // all-interfaces wildcard — regardless of whether Tailscale is present.
+        let resolved = resolve_bind("auto");
+        assert_ne!(resolved, "0.0.0.0");
+        assert!(!resolved.is_empty());
+    }
+}
