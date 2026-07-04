@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,27 @@ pub struct Agent {
     _reader_handle: JoinHandle<()>,
 }
 
+/// Terminal-type environment to advertise to a PTY child when the daemon's own
+/// environment lacks it.
+///
+/// A PTY slave is a real terminal, so color-aware CLIs (Claude Code, etc.)
+/// should emit color. But the daemon frequently runs detached — as a systemd
+/// unit (`tam serve --install-service`) or under `setsid` — with no `TERM` or
+/// `COLORTERM`, and it persists across sessions, so every agent it later spawns
+/// inherits that bare env and renders monochrome. Fill in accurate defaults
+/// while respecting any value the launching environment already provided.
+///
+/// `lookup` reads the daemon's environment (normally `std::env::var_os`);
+/// injecting it keeps this logic pure and unit-testable.
+fn pty_term_env(lookup: impl Fn(&str) -> Option<OsString>) -> Vec<(&'static str, &'static str)> {
+    const DEFAULTS: &[(&str, &str)] = &[("TERM", "xterm-256color"), ("COLORTERM", "truecolor")];
+    DEFAULTS
+        .iter()
+        .filter(|(key, _)| lookup(key).is_none())
+        .copied()
+        .collect()
+}
+
 impl Agent {
     /// Spawn a new agent process attached to a PTY.
     /// `env_vars` are set on the child process (e.g. TAM_AGENT_ID, TAM_SOCKET).
@@ -64,6 +86,12 @@ impl Agent {
 
         let mut cmd = provider.build_command(dir, args, resume_session, prompt);
         for (key, val) in env_vars {
+            cmd.env(key, val);
+        }
+
+        // A PTY slave is a real terminal; make sure color-aware agents know it.
+        // The daemon's own env can't be relied on — see `pty_term_env`.
+        for (key, val) in pty_term_env(|k| std::env::var_os(k)) {
             cmd.env(key, val);
         }
 
@@ -337,5 +365,40 @@ fn pty_reader_loop(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pty_term_env_fills_when_absent() {
+        // Detached daemon (systemd/setsid): neither var is present, so we
+        // advertise a color-capable terminal.
+        let vars = pty_term_env(|_| None);
+        assert_eq!(
+            vars,
+            vec![("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
+        );
+    }
+
+    #[test]
+    fn pty_term_env_respects_existing_values() {
+        // Launched from a real interactive shell: leave its terminal type alone.
+        let vars = pty_term_env(|k| match k {
+            "TERM" => Some(OsString::from("screen-256color")),
+            "COLORTERM" => Some(OsString::from("truecolor")),
+            _ => None,
+        });
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn pty_term_env_fills_only_the_missing_var() {
+        // TERM inherited but COLORTERM missing: add only COLORTERM, and never
+        // clobber the inherited TERM.
+        let vars = pty_term_env(|k| (k == "TERM").then(|| OsString::from("xterm")));
+        assert_eq!(vars, vec![("COLORTERM", "truecolor")]);
     }
 }
