@@ -3,7 +3,7 @@ mod ui;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -130,7 +130,10 @@ impl InputReader {
                         let _ = ack.send(());
                         continue;
                     }
-                    Ok(ReaderCtl::Resume) => paused = false,
+                    Ok(ReaderCtl::Resume) => {
+                        paused = false;
+                        discard_buffered_events();
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                 }
@@ -168,6 +171,25 @@ impl InputReader {
     }
 }
 
+/// Throw away everything crossterm has already taken from the terminal.
+///
+/// A poll reads a whole chunk of input and parses all of it, but hands back
+/// one event; the rest wait in crossterm's own queue, out of reach of tcflush,
+/// until the next read. A chunk taken just before a pause holds keys meant for
+/// the agent or a terminal reply — typed into the list a whole session later,
+/// minus the leading Alt+] that would have marked it as a reply.
+///
+/// The timeout must not be zero: with `use-dev-tty`, crossterm 0.28's tty
+/// source skips its whole read loop on a zero timeout, queue check included,
+/// and reports nothing while its parser still holds events.
+fn discard_buffered_events() {
+    while let Ok(true) = event::poll(Duration::from_millis(1)) {
+        if event::read().is_err() {
+            break;
+        }
+    }
+}
+
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
@@ -175,6 +197,7 @@ async fn run_loop(
     config: &Config,
 ) -> Result<()> {
     let mut input = InputReader::spawn();
+    let mut replies = ReplyFilter::default();
     let mut peek_timer = tokio::time::interval(Duration::from_secs(2));
     peek_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut git_timer = tokio::time::interval(Duration::from_secs(30));
@@ -187,7 +210,11 @@ async fn run_loop(
             Some(ev) = input.events.recv() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        handle_key_event(key, app, config)
+                        if replies.swallows(&key, Instant::now()) {
+                            Action::None
+                        } else {
+                            handle_key_event(key, app, config)
+                        }
                     }
                     _ => Action::None,
                 }
@@ -300,6 +327,54 @@ async fn run_loop(
 // ---------------------------------------------------------------------------
 // Key dispatch
 // ---------------------------------------------------------------------------
+
+/// A terminal reply that reaches the task list arrives as keystrokes.
+///
+/// Crossterm has no parser for OSC or DCS sequences: `ESC ] 11;rgb:… ESC \`
+/// decodes as Alt+`]`, then the payload as plain characters — whose first `/`
+/// opens the filter — then Alt+`\`. The relay drains replies on detach, but a
+/// terminal slow enough to answer after that drain would still type into the
+/// list. Nothing here binds Alt, so an Alt+<char> is never a command; and one
+/// that opens a string sequence starts a reply, which runs to its terminator.
+#[derive(Default)]
+struct ReplyFilter {
+    /// When the last key of the reply being swallowed arrived, if any.
+    in_reply: Option<Instant>,
+}
+
+/// A reply arrives in one burst. A gap this long means its terminator was
+/// lost, and the keys after it are the user's.
+const REPLY_GAP: Duration = Duration::from_millis(100);
+
+impl ReplyFilter {
+    /// True when `key` belongs to a terminal reply and must be dropped.
+    fn swallows(&mut self, key: &KeyEvent, now: Instant) -> bool {
+        if let Some(last) = self.in_reply {
+            if now.duration_since(last) < REPLY_GAP {
+                // ST (`ESC \`) or BEL ends the string.
+                let ends = (key.code == KeyCode::Char('\\')
+                    && key.modifiers.contains(KeyModifiers::ALT))
+                    || (key.code == KeyCode::Char('g')
+                        && key.modifiers.contains(KeyModifiers::CONTROL));
+                self.in_reply = if ends { None } else { Some(now) };
+                return true;
+            }
+            self.in_reply = None;
+        }
+
+        let KeyCode::Char(c) = key.code else {
+            return false;
+        };
+        if !key.modifiers.contains(KeyModifiers::ALT) {
+            return false;
+        }
+        // OSC, DCS, APC, PM, SOS: string sequences, which replies are made of.
+        if matches!(c, ']' | 'P' | '_' | '^' | 'X') {
+            self.in_reply = Some(now);
+        }
+        true
+    }
+}
 
 fn handle_key_event(key: KeyEvent, app: &mut App, config: &Config) -> Action {
     if app.filter_active {
@@ -1059,5 +1134,94 @@ async fn fetch_agents(client: &mut Client) -> Result<Vec<AgentInfo>> {
         tam_proto::Response::Agents { agents } => Ok(agents),
         tam_proto::Response::Error { message } => anyhow::bail!("daemon error: {message}"),
         _ => anyhow::bail!("unexpected response to List"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn chars(text: &str) -> Vec<KeyEvent> {
+        text.chars()
+            .map(|c| key(KeyCode::Char(c), KeyModifiers::NONE))
+            .collect()
+    }
+
+    /// The keys crossterm decodes from `ESC <intro> <payload> <terminator>`.
+    fn reply(intro: char, payload: &str, bel: bool) -> Vec<KeyEvent> {
+        let mut keys = vec![key(KeyCode::Char(intro), KeyModifiers::ALT)];
+        keys.extend(chars(payload));
+        keys.push(if bel {
+            key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+        } else {
+            key(KeyCode::Char('\\'), KeyModifiers::ALT)
+        });
+        keys
+    }
+
+    /// Feed keys in one burst; return the ones that got through.
+    fn passed(filter: &mut ReplyFilter, keys: &[KeyEvent], now: Instant) -> Vec<KeyEvent> {
+        keys.iter()
+            .filter(|k| !filter.swallows(k, now))
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn swallows_a_colour_report_whole() {
+        let mut f = ReplyFilter::default();
+        let keys = reply(']', "11;rgb:0a0a/0a0a/2424", false);
+        assert!(passed(&mut f, &keys, Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn swallows_a_bel_terminated_reply_and_xtversion() {
+        let mut f = ReplyFilter::default();
+        let now = Instant::now();
+        let mut keys = reply(']', "11;rgb:0a0a/0a0a/2424", true);
+        keys.extend(reply('P', ">|VTE(7600)", false));
+        assert!(passed(&mut f, &keys, now).is_empty());
+    }
+
+    #[test]
+    fn keys_after_a_reply_get_through() {
+        let mut f = ReplyFilter::default();
+        let now = Instant::now();
+        let mut keys = reply(']', "11;rgb:0a0a/0a0a/2424", false);
+        keys.extend(chars("/q"));
+        assert_eq!(passed(&mut f, &keys, now), chars("/q"));
+    }
+
+    #[test]
+    fn a_lost_terminator_does_not_eat_typing_for_ever() {
+        let mut f = ReplyFilter::default();
+        let start = Instant::now();
+        let keys = [key(KeyCode::Char(']'), KeyModifiers::ALT)];
+        assert!(passed(&mut f, &keys, start).is_empty());
+        assert!(passed(&mut f, &chars("11;rgb"), start).is_empty());
+        let later = start + REPLY_GAP * 2;
+        assert_eq!(passed(&mut f, &chars("j"), later), chars("j"));
+    }
+
+    #[test]
+    fn ordinary_keys_are_left_alone() {
+        let mut f = ReplyFilter::default();
+        let mut keys = chars("/demo");
+        keys.push(key(KeyCode::Enter, KeyModifiers::NONE));
+        keys.push(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(passed(&mut f, &keys, Instant::now()), keys);
+    }
+
+    #[test]
+    fn other_alt_keys_are_dropped_alone() {
+        let mut f = ReplyFilter::default();
+        let now = Instant::now();
+        let mut keys = vec![key(KeyCode::Char('x'), KeyModifiers::ALT)];
+        keys.extend(chars("q"));
+        assert_eq!(passed(&mut f, &keys, now), chars("q"));
     }
 }

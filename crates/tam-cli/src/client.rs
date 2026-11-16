@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 
 use anyhow::{Context, Result};
-use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg, Termios};
+use nix::sys::termios::{cfmakeraw, tcflush, tcgetattr, tcsetattr, FlushArg, SetArg, Termios};
 use tam_proto::{Request, Response, ServerMessage};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Interest};
@@ -20,6 +20,24 @@ const RESIZE_THROTTLE: Duration = Duration::from_millis(40);
 /// Upper bound on a resize round-trip. The relay waits on it, so an
 /// unresponsive daemon must not freeze the attach session.
 const RESIZE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Device status query (DSR), sent on detach as a sentinel.
+///
+/// Terminals answer queries (colour reports, device attributes) on stdin,
+/// unprompted by the user and long after the agent asked: on attach the daemon
+/// replays the agent's raw scrollback, startup queries included, and the
+/// terminal may still be working through it when the user detaches. A reply
+/// that lands once the relay has stopped would be read by whatever takes over
+/// the terminal next — the TUI decodes it as a burst of keystrokes. Terminals
+/// answer in order, so once the reply to this query arrives, every earlier one
+/// has. Not DA1, the usual sentinel: Claude Code sends DA1 itself, so a stale
+/// DA1 reply from the replayed scrollback would end the wait too early.
+const STATUS_QUERY: &[u8] = b"\x1b[5n";
+const STATUS_REPLY: &[u8] = b"\x1b[0n";
+
+/// Upper bound on the wait for [`STATUS_REPLY`], for a terminal that never
+/// sends one.
+const DETACH_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct Client {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -290,7 +308,62 @@ impl Client {
             }
         }
 
+        drain_terminal_replies(tty, &mut stdout).await;
         Ok(())
+    }
+}
+
+/// Detaching does not stop the terminal from talking. Until it answers our
+/// sentinel, anything it says answers a query the agent made, not a key the
+/// user pressed, so drop it rather than leave it for the next reader. Then
+/// flush whatever is still queued in the kernel.
+async fn drain_terminal_replies(tty: &AsyncFd<std::fs::File>, stdout: &mut tokio::io::Stdout) {
+    if stdout.write_all(STATUS_QUERY).await.is_ok() && stdout.flush().await.is_ok() {
+        let deadline = Instant::now() + DETACH_DRAIN_TIMEOUT;
+        let mut sentinel = SentinelScanner::new(STATUS_REPLY);
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout_at(deadline, read_tty(tty, &mut buf)).await {
+                // Discarded on purpose.
+                Ok(Ok(n)) if n > 0 && !sentinel.feed(&buf[..n]) => {}
+                // Terminal caught up, closed, failed, or no answer in time.
+                _ => break,
+            }
+        }
+    }
+    let _ = tcflush(tty.get_ref(), FlushArg::TCIFLUSH);
+}
+
+/// Spots a byte sequence in a stream that arrives in arbitrary chunks.
+struct SentinelScanner {
+    needle: &'static [u8],
+    /// The tail of the stream so far, short enough to hold a split needle.
+    tail: Vec<u8>,
+}
+
+impl SentinelScanner {
+    fn new(needle: &'static [u8]) -> Self {
+        Self {
+            needle,
+            tail: Vec::with_capacity(needle.len() * 2),
+        }
+    }
+
+    /// Feed the next chunk; true once the needle has been seen.
+    fn feed(&mut self, chunk: &[u8]) -> bool {
+        self.tail.extend_from_slice(chunk);
+        if self
+            .tail
+            .windows(self.needle.len())
+            .any(|w| w == self.needle)
+        {
+            return true;
+        }
+        let keep = self.needle.len() - 1;
+        if self.tail.len() > keep {
+            self.tail.drain(..self.tail.len() - keep);
+        }
+        false
     }
 }
 
@@ -542,5 +615,28 @@ mod tests {
     #[test]
     fn filter_emits_incomplete_on_non_match() {
         assert_eq!(filtered(b"\x1b[>1c"), b"\x1b[>1c");
+    }
+
+    #[test]
+    fn sentinel_found_in_one_chunk() {
+        let mut s = SentinelScanner::new(STATUS_REPLY);
+        assert!(s.feed(b"\x1b]11;rgb:0a0a/0a0a/2424\x1b\\\x1b[0n"));
+    }
+
+    #[test]
+    fn sentinel_found_across_chunks() {
+        let mut s = SentinelScanner::new(STATUS_REPLY);
+        assert!(!s.feed(b"\x1bP>|VTE(7600)\x1b\\\x1b["));
+        assert!(!s.feed(b"0"));
+        assert!(s.feed(b"n"));
+    }
+
+    #[test]
+    fn sentinel_ignores_other_replies() {
+        let mut s = SentinelScanner::new(STATUS_REPLY);
+        // DA1, cursor position, colour report: all answers, none of them ours.
+        assert!(!s.feed(b"\x1b[?65;1;9c"));
+        assert!(!s.feed(b"\x1b[10;20R"));
+        assert!(!s.feed(b"\x1b]11;rgb:0000/0000/0000\x07"));
     }
 }
