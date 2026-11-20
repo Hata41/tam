@@ -693,9 +693,14 @@ fn claude_most_recent_jsonl(project_dir: &Path) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+/// Encode a directory the way Claude names its project folders: every
+/// character that is not an ASCII letter or digit becomes `-`
+/// (`/home/u/a.b` → `-home-u-a-b`, `é` → `-`).
 fn encode_claude_path(dir: &Path) -> String {
-    let s = dir.to_string_lossy();
-    s.replace('/', "-")
+    dir.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 fn find_last_usage(content: &str) -> Option<(ClaudeUsage, Option<String>)> {
@@ -1463,6 +1468,14 @@ mod tests {
     #[test]
     fn encode_claude_path_root() {
         assert_eq!(encode_claude_path(Path::new("/")), "-");
+    }
+
+    #[test]
+    fn encode_claude_path_replaces_every_non_alphanumeric() {
+        assert_eq!(
+            encode_claude_path(Path::new("/home/u/rust_rl/v1.2/café")),
+            "-home-u-rust-rl-v1-2-caf-"
+        );
     }
 
     #[test]
