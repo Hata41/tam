@@ -37,6 +37,10 @@ regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests drive the built binary over a pty, so they need these in
+# their own right — the binary's dependencies are not linked into them.
+nix = { workspace = true }
+vt100 = { workspace = true }
 
 [build-dependencies]
 clap = { workspace = true }
