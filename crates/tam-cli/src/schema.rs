@@ -104,6 +104,9 @@ pub struct PsMember {
     /// The start of the agent's last response (`tam result` has all of it).
     pub last_message: Option<String>,
     pub last_run: Option<Run>,
+    /// A folder tam works in as it is (`tam new --borrow`): no worktree, no
+    /// branch (`""`), never removed.
+    pub borrowed: bool,
 }
 
 #[derive(Serialize)]
@@ -164,6 +167,8 @@ pub struct Started {
     /// The agent session it resumed; `null` for a new one (it shows in
     /// `tam ps --json` once the agent reports it).
     pub resumed_session: Option<String>,
+    /// A borrowed folder (see `PsMember`).
+    pub borrowed: bool,
 }
 
 /// `tam wait --json` and `tam result --json`: what the agents of the task's
@@ -265,6 +270,7 @@ impl PsMember {
             denied: detail.and_then(|d| d.denied.as_ref()).map(Denied::from),
             last_message: detail.and_then(|d| d.last_message.clone()),
             last_run: last_run.map(Run::from),
+            borrowed: info.borrowed,
         }
     }
 }
@@ -321,6 +327,7 @@ impl Started {
             dir: member.dir.clone(),
             agent: None,
             resumed_session: None,
+            borrowed: member.borrowed,
         }
     }
 }

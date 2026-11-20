@@ -265,6 +265,12 @@ pub struct MemberInfo {
     /// (unknown, not gone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<MemberHealth>,
+    /// A folder the task uses as it is (`BorrowDir`), git or not, rather
+    /// than a worktree tam made: `repo` is the folder's name and `branch`
+    /// empty. Dropping the member leaves the folder alone, and its health
+    /// only says whether the folder is still there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub borrowed: bool,
 }
 
 /// What the daemon last saw of a member's worktree, checked against `git
@@ -580,6 +586,17 @@ pub enum Request {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         join: Option<String>,
+    },
+    /// Make the existing directory `dir` a borrowed member (see
+    /// `MemberInfo::borrowed`) of a new task `task`, or with `join` of the
+    /// existing task `task`. Refused for a directory that is another task's
+    /// worktree, or already a member of this task. Replies `Task`; pushes
+    /// `TaskCreated` (new task) or `TaskUpdated`.
+    BorrowDir {
+        task: String,
+        dir: PathBuf,
+        #[serde(default)]
+        join: bool,
     },
     /// An agent's terminal screen. Replies `Screen`.
     Screen {
@@ -1487,6 +1504,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from("/tmp/myapp--feat"),
             health: None,
+            borrowed: false,
         }
     }
 

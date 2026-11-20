@@ -78,6 +78,56 @@ fn discover_recursive(
     Ok(())
 }
 
+/// Recursively discover plain (non-git) directories under `root`: folders a
+/// task can borrow as they are.
+///
+/// Like [`discover`], with the same `ignore_set` and `max_depth`, but it
+/// collects the directories that are not git projects. Git projects are
+/// never descended into; the `root` itself is not included.
+///
+/// Returns a sorted list of absolute paths.
+pub fn discover_dirs(root: &Path, ignore_set: &GlobSet, max_depth: usize) -> Result<Vec<PathBuf>> {
+    let root = root.canonicalize()?;
+    let mut results = Vec::new();
+    discover_dirs_recursive(&root, ignore_set, max_depth, 0, &mut results)?;
+    results.sort();
+    Ok(results)
+}
+
+fn discover_dirs_recursive(
+    dir: &Path,
+    ignore_set: &GlobSet,
+    max_depth: usize,
+    current_depth: usize,
+    results: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if current_depth > max_depth || dir.join(".git").exists() {
+        return Ok(());
+    }
+    if current_depth > 0 {
+        results.push(dir.to_path_buf());
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()), // skip unreadable directories
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == ".git" || ignore_set.is_match(name_str.as_ref()) {
+            continue;
+        }
+        discover_dirs_recursive(&path, ignore_set, max_depth, current_depth + 1, results)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +149,31 @@ mod tests {
         fs::create_dir_all(path).unwrap();
         let gitdir = main_repo.join(".git").join("worktrees").join("dummy");
         fs::write(path.join(".git"), format!("gitdir: {}", gitdir.display())).unwrap();
+    }
+
+    #[test]
+    fn test_discover_dirs_skips_git_projects_and_ignored() {
+        let tmp = TempDir::new().unwrap();
+        make_git_repo(&tmp.path().join("code").join("app"));
+        fs::create_dir_all(tmp.path().join("code").join("app").join("src")).unwrap();
+        fs::create_dir_all(tmp.path().join("notes").join("2026")).unwrap();
+        fs::create_dir_all(tmp.path().join(".cache").join("x")).unwrap();
+        fs::create_dir_all(tmp.path().join("a").join("b").join("c")).unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+
+        let results = discover_dirs(tmp.path(), &default_ignore(), 2).unwrap();
+        let rel: Vec<_> = results
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        // Not the root, not a repository or what is in it, not ignored, not
+        // past max_depth (a/b/c is at depth 3).
+        assert_eq!(rel, ["a", "a/b", "code", "notes", "notes/2026"]);
     }
 
     #[test]

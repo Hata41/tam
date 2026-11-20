@@ -163,6 +163,17 @@ fn branch_line(member: &Member, observation: Option<&Observation>) -> Option<Lin
         return None;
     }
     let dim = Style::new().fg(theme::get().muted);
+    if member.info.borrowed {
+        // What git says of it, if it is in git; no branch of its own.
+        let mut spans = vec![Span::styled("borrowed folder, left as it is", dim)];
+        if let Some(Ok(state)) = observation.and_then(|o| o.state.as_ref()) {
+            for part in branch_facts(state) {
+                spans.push(Span::styled(" · ", dim));
+                spans.extend(part);
+            }
+        }
+        return Some(Line::from(spans));
+    }
     let branch = &member.info.branch;
     let head = match &member.info.health {
         Some(MemberHealth::Ok { branch: Some(b) }) if b != branch => Span::styled(

@@ -64,11 +64,12 @@ enum Action {
         member: String,
     },
     /// Worktrees on branch `name` in the repositories `dirs` (main
-    /// checkouts): a new task, or more members of the task `name` if it
-    /// exists.
+    /// checkouts), or the folder `borrow` as it is: a new task, or more
+    /// members of the task `name` if it exists.
     DoNewTask {
         name: String,
         dirs: Vec<PathBuf>,
+        borrow: Option<PathBuf>,
     },
     CustomCommand {
         name: String,
@@ -473,8 +474,8 @@ async fn run_loop(
                 Action::RunAgent { member } => {
                     do_run(client, app, config, &member, SessionChoice::Current).await?;
                 }
-                Action::DoNewTask { name, dirs } => {
-                    do_new_task(client, app, &name, &dirs, config).await?;
+                Action::DoNewTask { name, dirs, borrow } => {
+                    do_new_task(client, app, &name, &dirs, borrow.as_deref(), config).await?;
                 }
                 Action::CustomCommand {
                     name,
@@ -842,15 +843,24 @@ fn handle_picker_key(key: KeyEvent, app: &mut App, config: &Config) -> Action {
 }
 
 fn handle_new_task_name_key(key: KeyEvent, app: &mut App) -> Action {
-    let Mode::NewTaskEnterName { name, project_dirs } = &mut app.mode else {
+    let Mode::NewTaskEnterName {
+        name,
+        project_dirs,
+        folder,
+        borrow,
+    } = &mut app.mode
+    else {
         return Action::None;
     };
     match key.code {
         KeyCode::Esc => app.mode = Mode::Normal,
+        // Worktrees, or the folder as it is (in git, both can be).
+        KeyCode::Tab if folder.is_some() && !project_dirs.is_empty() => *borrow = !*borrow,
         KeyCode::Enter if !name.is_empty() => {
             let action = Action::DoNewTask {
                 name: name.value().to_string(),
                 dirs: std::mem::take(project_dirs),
+                borrow: folder.take().filter(|_| *borrow),
             };
             app.mode = Mode::Normal;
             return action;
@@ -876,13 +886,9 @@ fn handle_enter_path_key(key: KeyEvent, app: &mut App) -> Action {
                 app.set_status(format!("Not a directory: {path}"), Duration::from_secs(3));
                 return Action::None;
             }
-            match repository(&dir) {
-                Ok(root) => {
-                    app.mode = Mode::NewTaskEnterName {
-                        project_dirs: vec![root],
-                        name: TextInput::default(),
-                    }
-                }
+            // Outside git, the folder can only be borrowed.
+            match picked(&dir) {
+                Ok((dir, root)) => app.mode = Mode::new_task(root.into_iter().collect(), Some(dir)),
                 Err(e) => app.set_status(e, Duration::from_secs(5)),
             }
         }
@@ -1161,8 +1167,9 @@ fn start_new_task_flow(app: &mut App) {
     app.mode = Mode::NewTaskPickProject(picker);
 }
 
-/// The projects under `$HOME` (`tam ls`'s discovery): it walks the
-/// directories, so not on the UI thread.
+/// The projects under `$HOME` (`tam ls`'s discovery), then the folders
+/// outside git, to borrow: it walks the directories, so not on the UI
+/// thread.
 fn discover_projects() -> Vec<PickerItem> {
     let Ok(wt_config) = tam_worktree::config::load_config() else {
         return Vec::new();
@@ -1174,13 +1181,24 @@ fn discover_projects() -> Vec<PickerItem> {
     let Ok(paths) = tam_worktree::discovery::discover(&root, &ignore, wt_config.max_depth) else {
         return Vec::new();
     };
-    tam_worktree::pretty::build_pretty_names(&paths)
+    let mut items: Vec<PickerItem> = tam_worktree::pretty::build_pretty_names(&paths)
         .into_iter()
         .map(|entry| PickerItem {
             display: entry.display_name,
             id: entry.path.to_string_lossy().into_owned(),
         })
-        .collect()
+        .collect();
+    let folders = tam_worktree::discovery::discover_dirs(&root, &ignore, wt_config.max_depth);
+    items.extend(
+        folders
+            .unwrap_or_default()
+            .into_iter()
+            .map(|dir| PickerItem {
+                display: format!("{} (folder)", ui::shorten_home(&dir.display().to_string())),
+                id: dir.to_string_lossy().into_owned(),
+            }),
+    );
+    items
 }
 
 /// Enter in the project picker: the projects picked with tab, else the
@@ -1203,36 +1221,53 @@ fn handle_picker_enter(app: &mut App, _config: &Config) -> Action {
         return Action::None;
     }
 
+    let alone = ids.len() == 1;
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut folder = None;
     for id in ids {
         let dir = if id == "__cwd__" {
             std::env::current_dir().unwrap_or_default()
         } else {
             PathBuf::from(&id)
         };
-        match repository(&dir) {
-            // A repository and one of its worktrees: one member.
-            Ok(root) if roots.contains(&root) => {}
-            Ok(root) => roots.push(root),
+        let (dir, root) = match picked(&dir) {
+            Ok(picked) => picked,
             Err(e) => {
                 app.set_status(e, Duration::from_secs(5));
                 return Action::None;
             }
+        };
+        match root {
+            // A repository and one of its worktrees: one member.
+            Some(root) if roots.contains(&root) => {}
+            Some(root) => roots.push(root),
+            // Borrowed, alone: a task has one folder outside git at most.
+            None if !alone => {
+                let msg = format!(
+                    "Not in a git repository: {} (pick a folder outside git alone)",
+                    dir.display()
+                );
+                app.set_status(msg, Duration::from_secs(5));
+                return Action::None;
+            }
+            None => {}
+        }
+        if alone {
+            folder = Some(dir);
         }
     }
-    app.mode = Mode::NewTaskEnterName {
-        project_dirs: roots,
-        name: TextInput::default(),
-    };
+    app.mode = Mode::new_task(roots, folder);
     Action::None
 }
 
-/// The main checkout of the repository a picked directory is in (a worktree
-/// stands for its repository); `Err` says why there is none.
-fn repository(dir: &std::path::Path) -> Result<PathBuf, String> {
+/// A picked directory, canonical, and the main checkout of the repository
+/// it is in (a worktree stands for its repository), if any; `Err` when it
+/// is not there.
+fn picked(dir: &std::path::Path) -> Result<(PathBuf, Option<PathBuf>), String> {
     let dir = std::fs::canonicalize(dir)
         .map_err(|_| format!("Directory not found: {}", dir.display()))?;
-    repos::main_checkout(&dir).map_err(|_| format!("Not in a git repository: {}", dir.display()))
+    let root = repos::main_checkout(&dir).ok();
+    Ok((dir, root))
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,17 +1373,22 @@ async fn do_new_task(
     app: &mut App,
     name: &str,
     dirs: &[PathBuf],
+    borrow: Option<&std::path::Path>,
     config: &Config,
 ) -> Result<()> {
     let join = app.tasks.iter().any(|t| t.name == name);
-    // The picker gave main checkouts, each once.
+    // The picker gave main checkouts, each once; or one folder to borrow.
     let roots = dirs;
+    let added = if borrow.is_some() { 1 } else { roots.len() };
 
     // The task shows up (or changes) through the daemon's events.
     let wt_config = tam_worktree::config::load_config()?;
-    let created = match repos::new_members(roots, name, &wt_config) {
-        Ok(members) => client.create_members(name, members, None, join).await,
-        Err(e) => Err(e),
+    let created = match borrow {
+        Some(dir) => client.borrow_dir(name, dir, join).await,
+        None => match repos::new_members(roots, name, &wt_config) {
+            Ok(members) => client.create_members(name, members, None, join).await,
+            Err(e) => Err(e),
+        },
     };
     let task = match created {
         Ok(task) => task,
@@ -1361,8 +1401,9 @@ async fn do_new_task(
             return Ok(());
         }
     };
-    let new = &task.members[task.members.len().saturating_sub(roots.len())..];
-    if wt_config.auto_init {
+    let new = &task.members[task.members.len().saturating_sub(added)..];
+    // A borrowed folder is left as it is.
+    if wt_config.auto_init && borrow.is_none() {
         for member in new {
             let _ = tam_worktree::init::run(&member.dir);
         }
@@ -1385,6 +1426,10 @@ async fn do_new_task(
         }
     }
     let what = match (join, new) {
+        (false, [m]) if m.borrowed => format!(
+            "Created+started '{name}' in {} (borrowed)",
+            ui::shorten_home(&m.dir.display().to_string())
+        ),
         (false, [_]) => format!("Created+started '{name}'"),
         (false, _) => format!("Created+started '{name}' in {} repositories", new.len()),
         (true, _) => {
@@ -1837,6 +1882,7 @@ mod tests {
                 branch: "feat".into(),
                 dir: PathBuf::from("/w/app--feat"),
                 health,
+                borrowed: false,
             }],
             created_at: 0,
             run_count: 0,
@@ -2009,6 +2055,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from(format!("/w/{name}--feat")),
             health: None,
+            borrowed: false,
         };
         let task = |name: &str, members| tam_proto::TaskInfo {
             name: name.into(),
@@ -2503,6 +2550,70 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_can_be_borrowed_as_it_is() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let out = tam_worktree::git::command()
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let notes = tmp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let (repo, notes) = (repo.canonicalize().unwrap(), notes.canonicalize().unwrap());
+        let item = |path: &std::path::Path| PickerItem {
+            display: path.display().to_string(),
+            id: path.to_str().unwrap().into(),
+        };
+        let config = Config::default();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let pick = |app: &mut App, codes: &[KeyCode]| {
+            app.mode = Mode::NewTaskPickProject(PickerState::new(
+                "Pick project",
+                vec![item(&repo), item(&notes)],
+            ));
+            for code in codes {
+                handle_picker_key(key(*code), app, &config);
+            }
+        };
+        let name = |app: &mut App, codes: &[KeyCode]| {
+            for c in "t".chars() {
+                handle_new_task_name_key(press(c), app);
+            }
+            let mut action = Action::None;
+            for code in codes {
+                action = handle_new_task_name_key(key(*code), app);
+            }
+            action
+        };
+        let mut app = App::new();
+
+        // Outside git: borrowed, tab changes nothing.
+        pick(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+        let action = name(&mut app, &[KeyCode::Tab, KeyCode::Enter]);
+        assert!(
+            matches!(&action, Action::DoNewTask { dirs, borrow: Some(b), .. }
+                if dirs.is_empty() && *b == notes)
+        );
+
+        // In git: a worktree, or with tab the folder as it is.
+        pick(&mut app, &[KeyCode::Enter]);
+        let action = name(&mut app, &[KeyCode::Enter]);
+        assert!(
+            matches!(&action, Action::DoNewTask { dirs, borrow: None, .. } if *dirs == [repo.clone()])
+        );
+        pick(&mut app, &[KeyCode::Enter]);
+        let action = name(&mut app, &[KeyCode::Tab, KeyCode::Enter]);
+        assert!(matches!(&action, Action::DoNewTask { borrow: Some(b), .. } if *b == repo));
+
+        // A folder outside git among several picks: refused.
+        pick(&mut app, &[KeyCode::Tab, KeyCode::Tab, KeyCode::Enter]);
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
     fn tab_picks_several_projects_in_order() {
         let tmp = tempfile::TempDir::new().unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
@@ -2593,7 +2704,7 @@ mod tests {
         }
         let action = handle_new_task_name_key(key(KeyCode::Enter), &mut app);
         assert!(
-            matches!(action, Action::DoNewTask { ref name, ref dirs } if name == "feat" && *dirs == expected)
+            matches!(action, Action::DoNewTask { ref name, ref dirs, borrow: None } if name == "feat" && *dirs == expected)
         );
     }
 
@@ -2754,6 +2865,8 @@ mod tests {
         app.mode = Mode::NewTaskEnterName {
             project_dirs: vec![PathBuf::from("/src/api")],
             name: TextInput::from("feat-x"),
+            folder: None,
+            borrow: false,
         };
         // ctrl-u clears (it typed a `u` before), ← then a character inserts.
         handle_key_event(
@@ -2770,7 +2883,7 @@ mod tests {
         handle_key_event(press('x'), &mut app, &config);
         let action = handle_key_event(key(KeyCode::Enter, KeyModifiers::NONE), &mut app, &config);
         assert!(
-            matches!(action, Action::DoNewTask { ref name, ref dirs } if name == "fix-xnav" && dirs.len() == 1),
+            matches!(action, Action::DoNewTask { ref name, ref dirs, borrow: None } if name == "fix-xnav" && dirs.len() == 1),
         );
 
         // The filter: typed, edited, esc clears it, esc again closes it.

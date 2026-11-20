@@ -116,6 +116,7 @@ mod tests {
             health: Some(MemberHealth::Ok {
                 branch: Some(branch.into()),
             }),
+            borrowed: false,
         }
     }
 

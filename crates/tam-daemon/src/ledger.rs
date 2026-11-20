@@ -5,7 +5,8 @@
 //! stray old client) cannot interleave appends.
 //!
 //! A task is a name and one or more members: a worktree each, with at most
-//! one agent session. Members have a stable id, independent of the task and
+//! one agent session. A member may instead be a borrowed folder, used as it
+//! is (git or not): tam never removes or checks it. Members have a stable id, independent of the task and
 //! branch names, and agent runs are recorded against it — so moving a member
 //! to another task only needs one event. Member short names are derived when
 //! the ledger is read, never stored.
@@ -18,13 +19,14 @@
 //!
 //! Ledgers written before tasks had members are migrated on open (see
 //! [`LegacyEvent`]): the old file is kept as `<ledger>.pre-members` and the
-//! ledger is rewritten in the current format.
+//! ledger is rewritten in the current format. A legacy borrowed task becomes
+//! a task with one borrowed member.
 //!
 //! Next to the folded tasks, the ledger keeps what reconciliation observed of
 //! the members' worktrees (their health, their repository): in memory only,
 //! never written, like any other derived state.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
@@ -58,6 +60,9 @@ pub enum LedgerEvent {
         branch: String,
         dir: PathBuf,
         timestamp: u64,
+        /// A folder used as it is, not a worktree (`branch` is empty).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        borrowed: bool,
     },
     AgentRunStarted {
         member: String,
@@ -200,9 +205,6 @@ pub struct LoadReport {
     pub migrated: usize,
     /// Copy of the ledger taken before migrating it, when one was written.
     pub backup: Option<PathBuf>,
-    /// Active borrowed tasks the migration dropped (tasks always own their
-    /// worktrees now). Their directories are left alone.
-    pub dropped_borrowed: Vec<String>,
 }
 
 /// An active task folded from its events.
@@ -225,6 +227,7 @@ struct MemberRecord {
     repo_root: Option<PathBuf>,
     branch: String,
     dir: PathBuf,
+    borrowed: bool,
     runs: Vec<RunInfo>,
     /// The response that ended the last turn of the latest run, once the
     /// run is over (see `Ledger::last_response`).
@@ -373,7 +376,6 @@ impl Ledger {
         }
         report.compacted = seq - kept + migration.orphans;
         report.migrated = migration.lines;
-        report.dropped_borrowed = migration.borrowed.into_iter().collect();
 
         let file = OpenOptions::new()
             .create(true)
@@ -519,13 +521,18 @@ impl Ledger {
         bail!("task '{}' not found", target)
     }
 
-    /// The member whose worktree contains `dir` (the innermost one).
+    /// The member whose worktree contains `dir` (the innermost one). A
+    /// borrowed folder only counts as itself: borrowing `~` must not claim
+    /// every directory under it.
     pub fn member_at(&self, dir: &Path) -> Option<(TaskInfo, MemberInfo)> {
         let id = self
             .state
             .members
             .values()
-            .filter(|m| dir.starts_with(&m.dir))
+            .filter(|m| match m.borrowed {
+                true => dir == m.dir,
+                false => dir.starts_with(&m.dir),
+            })
             .max_by_key(|m| m.dir.components().count())?
             .id
             .clone();
@@ -589,9 +596,52 @@ impl Ledger {
                 branch: m.branch.clone(),
                 dir: m.dir.clone(),
                 timestamp,
+                borrowed: false,
             });
         }
         Ok(events)
+    }
+
+    /// Record the folder `dir` as a borrowed member: of a new task `task`, or
+    /// with `join` of the existing task `task`. Refused for another task's
+    /// worktree, or a folder the task already has; tasks may share a
+    /// borrowed folder (several in `~`). Returns the task.
+    pub fn borrow_dir(&mut self, task: &str, dir: &Path, join: bool) -> Result<TaskInfo> {
+        if join {
+            self.require(task)?;
+        } else if task.trim().is_empty() {
+            bail!("task name cannot be empty");
+        } else if self.state.tasks.contains_key(task) {
+            bail!("task '{}' already exists", task);
+        }
+        for m in self.state.members.values().filter(|m| m.dir == dir) {
+            if !m.borrowed {
+                bail!("{} is the worktree of task '{}'", dir.display(), m.task);
+            }
+            if m.task == task {
+                bail!("{} is already a member of task '{}'", dir.display(), task);
+            }
+        }
+        let timestamp = now();
+        let mut events = Vec::new();
+        if !join {
+            events.push(LedgerEvent::TaskCreated {
+                name: task.into(),
+                timestamp,
+            });
+        }
+        events.push(LedgerEvent::MemberAdded {
+            task: task.into(),
+            member: new_member_id(|id| self.state.members.contains_key(id)),
+            repo: folder_name(dir),
+            repo_root: None,
+            branch: String::new(),
+            dir: dir.to_path_buf(),
+            timestamp,
+            borrowed: true,
+        });
+        self.append_all(events)?;
+        Ok(self.task(task).expect("task exists"))
     }
 
     /// Record the start of a member's agent run. Closes a still-open
@@ -912,6 +962,7 @@ impl State {
                 repo_root,
                 branch,
                 dir,
+                borrowed,
                 ..
             } => {
                 if self.members.contains_key(member) {
@@ -928,6 +979,7 @@ impl State {
                     repo_root: repo_root.clone(),
                     branch: branch.clone(),
                     dir: dir.clone(),
+                    borrowed: *borrowed,
                     runs: Vec::new(),
                     response: None,
                     events: Vec::new(),
@@ -1105,6 +1157,7 @@ impl State {
                     branch: m.branch.clone(),
                     dir: m.dir.clone(),
                     health: self.observed.get(&m.id).and_then(|o| o.health.clone()),
+                    borrowed: m.borrowed,
                 })
                 .collect(),
             created_at: task.created_at,
@@ -1151,6 +1204,20 @@ impl Ledger {
         }
         let changed = observed.health.as_ref() != Some(&health);
         observed.health = Some(health);
+        changed.then_some(task)
+    }
+
+    /// Record whether a borrowed member's folder is still there: gone, or
+    /// unknown health again (nothing else is checked of it). Returns the
+    /// member's task when that changed.
+    pub fn observe_folder(&mut self, member: &str, present: bool) -> Option<String> {
+        let task = self.state.members.get(member)?.task.clone();
+        let health = (!present).then(|| MemberHealth::Gone {
+            cannot_repair: Some(BORROWED_GONE.into()),
+        });
+        let observed = self.state.observed.entry(member.to_string()).or_default();
+        let changed = observed.health != health;
+        observed.health = health;
         changed.then_some(task)
     }
 
@@ -1400,14 +1467,15 @@ impl State {
 
 /// Short names of a task's members, given in join order: the repository
 /// name, or `<repo>-<branch>` when an earlier member has it (then a numeric
-/// suffix). A member joining never renames the members before it.
+/// suffix; a borrowed folder has no branch). A member joining never renames
+/// the members before it.
 fn member_names(members: &[&MemberRecord]) -> Vec<String> {
     let mut names: Vec<String> = Vec::with_capacity(members.len());
     for m in members {
         // `/` separates the task from the member in `<task>/<member>`.
         let repo = m.repo.replace('/', "-");
         let mut name = repo.clone();
-        if names.contains(&name) {
+        if names.contains(&name) && !m.branch.is_empty() {
             name = format!("{}-{}", repo, m.branch.replace('/', "-"));
         }
         let base = name.clone();
@@ -1464,8 +1532,6 @@ pub(crate) fn random_u32() -> u32 {
 struct Migration {
     /// Member id given to each active legacy task, by task name.
     members: HashMap<String, String>,
-    /// Active borrowed tasks (no longer supported), dropped by the migration.
-    borrowed: BTreeSet<String>,
     /// Legacy lines read.
     lines: usize,
     /// Legacy lines dropped because they named no task.
@@ -1475,7 +1541,8 @@ struct Migration {
 impl Migration {
     /// The current events for a legacy line. An owned task becomes a task
     /// with one member: its worktree, on the branch named after the task
-    /// (tam created both from the task name). A borrowed task is dropped.
+    /// (tam created both from the task name). A borrowed task becomes a task
+    /// with one borrowed member: its folder.
     fn convert(&mut self, legacy: LegacyEvent, state: &State) -> Vec<LedgerEvent> {
         self.lines += 1;
         let (task, event): (String, Box<dyn FnOnce(String) -> LedgerEvent>) = match legacy {
@@ -1486,19 +1553,6 @@ impl Migration {
                 timestamp,
             } => {
                 self.forget(&name);
-                if !owned {
-                    // A re-created name replaced the earlier task: end it.
-                    let replaced =
-                        state
-                            .tasks
-                            .contains_key(&name)
-                            .then(|| LedgerEvent::TaskDropped {
-                                task: name.clone(),
-                                timestamp,
-                            });
-                    self.borrowed.insert(name);
-                    return replaced.into_iter().collect();
-                }
                 let member = new_member_id(|id| {
                     state.members.contains_key(id) || self.members.values().any(|m| m == id)
                 });
@@ -1508,14 +1562,27 @@ impl Migration {
                         name: name.clone(),
                         timestamp,
                     },
-                    LedgerEvent::MemberAdded {
-                        task: name.clone(),
-                        member,
-                        repo: legacy_repo_name(&dir, &name),
-                        repo_root: None,
-                        branch: name,
-                        dir,
-                        timestamp,
+                    match owned {
+                        true => LedgerEvent::MemberAdded {
+                            task: name.clone(),
+                            member,
+                            repo: legacy_repo_name(&dir, &name),
+                            repo_root: None,
+                            branch: name,
+                            dir,
+                            timestamp,
+                            borrowed: false,
+                        },
+                        false => LedgerEvent::MemberAdded {
+                            task: name,
+                            member,
+                            repo: folder_name(&dir),
+                            repo_root: None,
+                            branch: String::new(),
+                            dir,
+                            timestamp,
+                            borrowed: true,
+                        },
                     },
                 ];
             }
@@ -1562,10 +1629,7 @@ impl Migration {
         match self.members.get(&task) {
             Some(member) => vec![event(member.clone())],
             None => {
-                // A borrowed task's run goes with it; anything else is an orphan.
-                if !self.borrowed.contains(&task) {
-                    self.orphans += 1;
-                }
+                self.orphans += 1;
                 Vec::new()
             }
         }
@@ -1583,8 +1647,18 @@ impl Migration {
 
     fn forget(&mut self, task: &str) {
         self.members.remove(task);
-        self.borrowed.remove(task);
     }
+}
+
+/// Why a gone borrowed folder cannot be recreated.
+pub const BORROWED_GONE: &str = "a borrowed folder, tam did not create it";
+
+/// A borrowed folder's name, its `repo`: the last component, else the
+/// whole path (`/`).
+fn folder_name(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir.display().to_string())
 }
 
 /// Repository name of a legacy owned task's worktree, from its directory:
@@ -1721,6 +1795,7 @@ mod tests {
             branch: task.into(),
             dir: dir.into(),
             timestamp: ts,
+            borrowed: false,
         }
     }
 
@@ -1833,6 +1908,7 @@ mod tests {
             response: None,
             events: vec![],
             messages: vec![],
+            borrowed: false,
         };
         let two = MemberRecord {
             id: "m-2".into(),
@@ -1967,6 +2043,92 @@ mod tests {
         // Component-wise: a sibling sharing a prefix does not match.
         assert!(ledger.member_at(Path::new("/w/app--feature")).is_none());
         assert!(ledger.member_at(Path::new("/w")).is_none());
+    }
+
+    #[test]
+    fn borrowed_folders_are_members_of_their_own() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ledger.jsonl");
+        let mut ledger = Ledger::open(&path).unwrap().0;
+        let feat = create(&mut ledger, "feat", "/home/u/w/app--feat");
+
+        let mail = ledger
+            .borrow_dir("mail", Path::new("/home/u"), false)
+            .unwrap();
+        let [m] = mail.members.as_slice() else {
+            panic!("{mail:?}");
+        };
+        assert!(m.borrowed);
+        assert_eq!((m.repo.as_str(), m.name.as_str()), ("u", "u"));
+        assert_eq!(m.branch, "");
+        assert!(m.repo_root.is_none());
+        let mail_id = m.id.clone();
+
+        // Tasks may share a borrowed folder, a task may not have it twice,
+        // and no task borrows another's worktree.
+        let notes = ledger
+            .borrow_dir("notes", Path::new("/home/u"), false)
+            .unwrap();
+        let err = |r: Result<TaskInfo>| format!("{:#}", r.unwrap_err());
+        assert!(err(ledger.borrow_dir("mail", Path::new("/home/u"), true))
+            .contains("already a member of task 'mail'"));
+        assert!(
+            err(ledger.borrow_dir("x", Path::new("/home/u/w/app--feat"), false))
+                .contains("worktree of task 'feat'")
+        );
+        assert!(err(ledger.borrow_dir("feat", Path::new("/tmp"), false)).contains("already exists"));
+        assert!(err(ledger.borrow_dir("nope", Path::new("/tmp"), true)).contains("not found"));
+
+        // Joining: the folder is the task's second member, named apart.
+        let both = ledger
+            .borrow_dir("feat", Path::new("/srv/u"), true)
+            .unwrap();
+        let names: Vec<&str> = both.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["app", "u"]);
+        let twice = ledger
+            .borrow_dir("mail", Path::new("/srv/u"), true)
+            .unwrap();
+        let names: Vec<&str> = twice.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["u", "u-2"]);
+
+        // A borrowed folder is only itself: `~` claims nothing under it.
+        let at = |dir: &str| ledger.member_at(Path::new(dir)).map(|(_, m)| m.id);
+        assert!([Some(mail_id.clone()), Some(notes.members[0].id.clone())].contains(&at("/home/u")));
+        assert_eq!(at("/home/u/w/app--feat/src"), Some(feat));
+        assert_eq!(at("/home/u/elsewhere"), None);
+
+        // Kept across a reopen, with its runs.
+        ledger.run_started(&mail_id, "claude", None).unwrap();
+        drop(ledger);
+        let ledger = Ledger::open(&path).unwrap().0;
+        let (task, member) = ledger.member(&mail_id).unwrap();
+        assert_eq!(task.name, "mail");
+        assert!(member.borrowed);
+        assert!(ledger.has_open_run(&mail_id));
+        assert!(!ledger.task("feat").unwrap().members[0].borrowed);
+    }
+
+    #[test]
+    fn a_borrowed_folder_is_only_ever_gone_or_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let mut ledger = open(&tmp);
+        let task = ledger.borrow_dir("b", Path::new("/srv/x"), false).unwrap();
+        let id = task.members[0].id.clone();
+
+        assert_eq!(ledger.observe_folder(&id, true), None);
+        assert_eq!(ledger.observe_folder(&id, false).as_deref(), Some("b"));
+        let health = ledger.task("b").unwrap().members[0].health.clone();
+        assert_eq!(
+            health,
+            Some(MemberHealth::Gone {
+                cannot_repair: Some(BORROWED_GONE.into())
+            })
+        );
+        assert!(!health.unwrap().is_repairable());
+        assert_eq!(ledger.observe_folder(&id, false), None);
+        assert_eq!(ledger.observe_folder(&id, true).as_deref(), Some("b"));
+        assert_eq!(ledger.task("b").unwrap().members[0].health, None);
+        assert_eq!(ledger.observe_folder("m-unknown", false), None);
     }
 
     #[test]
@@ -2201,7 +2363,7 @@ mod tests {
         "\n",
         r#"{"type":"agent_run_started","task":"feat","provider":"codex","session_id":"s2","timestamp":400}"#,
         "\n",
-        // Borrowed, still active: dropped by the migration.
+        // Borrowed, still active: a task with one borrowed member.
         r#"{"type":"task_created","name":"here","dir":"/src/myapp","owned":false,"timestamp":500}"#,
         "\n",
         r#"{"type":"agent_run_started","task":"here","provider":"claude","timestamp":510}"#,
@@ -2219,7 +2381,7 @@ mod tests {
         r#"{"type":"task_dropped","task":"done","timestamp":620}"#,
         "\n",
         // Owned, then re-created borrowed without a drop: the borrowed task
-        // replaced the owned one, so it goes too.
+        // replaced the owned one, history and all.
         r#"{"type":"task_created","name":"redo","dir":"/w/myapp--redo","owned":true,"timestamp":630}"#,
         "\n",
         r#"{"type":"agent_run_started","task":"redo","provider":"claude","timestamp":631}"#,
@@ -2244,13 +2406,12 @@ mod tests {
         assert!(report.malformed.is_empty(), "{:?}", report.malformed);
         // `task_dropped` and `worktree_deleted` kept their shape: not legacy.
         assert_eq!(report.migrated, 14);
-        assert_eq!(report.dropped_borrowed, ["here", "redo"]);
         let backup = tmp.path().join("ledger.jsonl.pre-members");
         assert_eq!(report.backup.as_deref(), Some(backup.as_path()));
         assert_eq!(fs::read_to_string(&backup).unwrap(), LEGACY);
 
         let names: Vec<String> = ledger.tasks().into_iter().map(|t| t.name).collect();
-        assert_eq!(names, ["feat", "fix/x"]);
+        assert_eq!(names, ["feat", "fix/x", "here", "redo"]);
 
         // Owned tasks load as single-member tasks.
         let feat = ledger.task("feat").unwrap();
@@ -2275,6 +2436,22 @@ mod tests {
         let fix = ledger.task("fix/x").unwrap();
         assert_eq!(fix.members[0].repo, "api");
         assert_eq!(fix.members[0].branch, "fix/x");
+        assert!(!fix.members[0].borrowed);
+
+        // Borrowed tasks keep their folder and their runs.
+        let here = ledger.task("here").unwrap();
+        let [b] = here.members.as_slice() else {
+            panic!("{here:?}");
+        };
+        assert!(b.borrowed);
+        assert_eq!(b.dir, Path::new("/src/myapp"));
+        assert_eq!(b.name, "myapp");
+        assert_eq!(b.branch, "");
+        assert!(ledger.has_open_run(&b.id));
+        let redo = ledger.task("redo").unwrap();
+        assert!(redo.members[0].borrowed);
+        assert_eq!(redo.created_at, 640);
+        assert_eq!(redo.run_count, 0);
 
         // Rewritten in the current format, with nothing legacy left.
         let feat_id = m.id.clone();
@@ -2290,10 +2467,16 @@ mod tests {
                 "agent_run_started",
                 "task_created",
                 "member_added",
+                "agent_run_started",
+                "task_created",
+                "member_added",
+                "task_created",
+                "member_added",
             ]
         );
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("\"owned\""), "{raw}");
+        assert_eq!(raw.matches("\"borrowed\":true").count(), 2, "{raw}");
 
         // Member ids are stable, and a migrated ledger is left alone.
         let (ledger, report) = Ledger::open(&path).unwrap();
@@ -3133,7 +3316,8 @@ mod tests {
         let expected = folded(&ledger);
         drop(ledger);
         let ledger = reopen_keeps(&path, &expected);
-        assert_eq!(ledger.tasks().len(), 1);
+        // `fix/x`, and the borrowed `here` and `redo`.
+        assert_eq!(ledger.tasks().len(), 3);
         assert_eq!(ledger.member_runs(&myapp)[1].exit_code, Some(0));
     }
 

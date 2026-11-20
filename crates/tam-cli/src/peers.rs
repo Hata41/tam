@@ -208,6 +208,7 @@ fn member_json(task: &Task, member: &Member, address: Option<&str>) -> Value {
         "agent": agent.map(|a| &a.provider),
         "description": agent.and_then(description),
         "health": member.info.health,
+        "borrowed": member.info.borrowed,
     });
     if let Some(address) = address {
         out["address"] = address.into();
@@ -264,7 +265,11 @@ fn table(rows: &[Row]) -> Vec<String> {
                     .as_ref()
                     .map_or("-".into(), |a| a.provider.clone()),
                 m.repo.clone(),
-                m.branch.clone(),
+                if m.borrowed {
+                    "-".into()
+                } else {
+                    m.branch.clone()
+                },
                 m.dir.display().to_string(),
             ]
         })
@@ -374,6 +379,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from("/w").join(name),
             health: None,
+            borrowed: false,
         };
         let detail = AgentDetail {
             last_message: Some("Agreed: POST /items".into()),

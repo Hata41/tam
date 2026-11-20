@@ -435,6 +435,8 @@ fn branch_cell(member: &Member, observation: Option<&Observation>) -> Line<'stat
     }
     let state = match observation.and_then(|o| o.state.as_ref()) {
         None => return Line::styled("…", dim),
+        // A borrowed folder outside git: nothing to say.
+        Some(Err(_)) if member.info.borrowed => return Line::styled("-", dim),
         Some(Err(_)) => return Line::styled("?", dim),
         Some(Ok(state)) => state,
     };

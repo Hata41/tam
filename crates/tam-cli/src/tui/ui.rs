@@ -67,15 +67,30 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Normal | Mode::Terminal { .. } | Mode::NewTaskPickProject(_) | Mode::Answer(_) => {}
         Mode::Help => render_help_popup(frame, app),
-        Mode::NewTaskEnterName { name, project_dirs } => {
+        Mode::NewTaskEnterName {
+            name,
+            project_dirs,
+            folder,
+            borrow,
+        } => {
             let joins = app.tasks.iter().any(|t| t.name == name.value());
-            render_new_task_popup(frame, name, project_dirs, joins);
+            let borrowed = folder.as_deref().filter(|_| *borrow);
+            render_new_task_popup(frame, name, project_dirs, borrowed, joins);
         }
         Mode::SpawnEnterPath(path) => {
             render_enter_path_popup(frame, path);
         }
         Mode::ConfirmDropTask { name, member } => {
-            render_confirm_drop_popup(frame, name, member.as_ref());
+            // Whether a borrowed folder is among what would go.
+            let borrowed = app.tasks.iter().find(|t| t.name == *name).is_some_and(|t| {
+                t.members.iter().any(|m| {
+                    m.info.borrowed
+                        && member
+                            .as_ref()
+                            .is_none_or(|c| t.members.len() == 1 || c.id == m.info.id)
+                })
+            });
+            render_confirm_drop_popup(frame, name, member.as_ref(), borrowed);
         }
         Mode::ConfirmForceDrop {
             name,
@@ -226,12 +241,29 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &mut App) {
                 frame.render_widget(fit_hints(hints, area.width).fg(t.muted), area);
                 return;
             }
-            Mode::NewTaskEnterName { .. } => vec![
-                Span::styled(" enter", Style::new().bold()),
-                Span::raw(":create  "),
-                Span::styled("esc", Style::new().bold()),
-                Span::raw(":cancel"),
-            ],
+            Mode::NewTaskEnterName {
+                ref project_dirs,
+                ref folder,
+                borrow,
+                ..
+            } => {
+                let mut hints = vec![
+                    Span::styled(" enter", Style::new().bold()),
+                    Span::raw(":create  "),
+                ];
+                // In git, the folder picked can be borrowed instead.
+                if folder.is_some() && !project_dirs.is_empty() {
+                    hints.push(Span::styled("tab", Style::new().bold()));
+                    hints.push(Span::raw(if borrow {
+                        ":new worktree  "
+                    } else {
+                        ":use the folder as is  "
+                    }));
+                }
+                hints.push(Span::styled("esc", Style::new().bold()));
+                hints.push(Span::raw(":cancel"));
+                hints
+            }
             Mode::NewTaskPickProject(_) => vec![
                 Span::styled(" enter", Style::new().bold()),
                 Span::raw(":select  "),
@@ -702,12 +734,14 @@ fn repo_names(dirs: &[std::path::PathBuf]) -> String {
     names.join(", ")
 }
 
-/// The task name input, with where its worktrees go: a new task, or more
-/// members of the existing task of that name (`joins`).
+/// The task name input, with where its worktrees go (or the folder it
+/// borrows): a new task, or more members of the existing task of that name
+/// (`joins`).
 fn render_new_task_popup(
     frame: &mut Frame,
     name: &TextInput,
     dirs: &[std::path::PathBuf],
+    borrowed: Option<&std::path::Path>,
     joins: bool,
 ) {
     // 2 content rows + 2 border + 2 vertical padding = 6
@@ -736,8 +770,18 @@ fn render_new_task_popup(
             .areas(name_row);
     frame.render_widget(Span::raw(label), label_area);
     name.render(frame, text, Style::new().bold(), true);
-    let repos = repo_names(dirs);
-    let where_line = if joins {
+    let repos = match borrowed {
+        Some(dir) => shorten_home(&dir.display().to_string()),
+        None => repo_names(dirs),
+    };
+    let where_line = if let (Some(_), false) = (borrowed, joins) {
+        Line::from(vec![
+            Span::raw("in "),
+            Span::raw(repos),
+            Span::raw(" as it is, no worktree"),
+        ])
+        .fg(theme::get().muted)
+    } else if joins {
         Line::from(vec![
             Span::styled("adds ", Style::new().fg(theme::get().warn)),
             Span::raw(repos),
@@ -917,7 +961,12 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
 
 /// Asks to drop a task, or (with `member`, the focused member of a task
 /// with several) that member alone.
-fn render_confirm_drop_popup(frame: &mut Frame, name: &str, member: Option<&MemberChoice>) {
+fn render_confirm_drop_popup(
+    frame: &mut Frame,
+    name: &str,
+    member: Option<&MemberChoice>,
+    borrowed: bool,
+) {
     let red = |key: &'static str| Span::styled(key, Style::new().bold().fg(theme::get().bad));
     let mut lines = match member {
         None => vec![Line::from(vec![
@@ -953,6 +1002,12 @@ fn render_confirm_drop_popup(frame: &mut Frame, name: &str, member: Option<&Memb
         Span::styled("n", Style::new().bold()),
         Span::raw(" cancel"),
     ]));
+    if borrowed {
+        lines.push(
+            Line::raw("Borrowed folders stay as they are: their agents stop, no branch goes")
+                .fg(theme::get().muted),
+        );
+    }
 
     // Size to content: +8 for padding + border, +4 rows for border + padding
     let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
@@ -1374,6 +1429,7 @@ mod tests {
             health: Some(MemberHealth::Ok {
                 branch: Some("feat".into()),
             }),
+            borrowed: false,
         }
     }
 
@@ -1848,6 +1904,8 @@ mod tests {
         app.mode = Mode::NewTaskEnterName {
             project_dirs: dirs.clone(),
             name: "other".into(),
+            folder: None,
+            borrow: false,
         };
         let s = screen(&mut app, 100, 30);
         assert!(s.contains("Task name: other"), "{s}");
@@ -1857,9 +1915,53 @@ mod tests {
         app.mode = Mode::NewTaskEnterName {
             project_dirs: dirs,
             name: "feat".into(),
+            folder: None,
+            borrow: false,
         };
         let s = screen(&mut app, 100, 30);
         assert!(s.contains("adds web, docs to this existing task"), "{s}");
+
+        // A folder borrowed: as it is.
+        app.mode = Mode::NewTaskEnterName {
+            project_dirs: vec![],
+            name: "notes".into(),
+            folder: Some("/data/notes".into()),
+            borrow: true,
+        };
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("in /data/notes as it is, no worktree"), "{s}");
+        assert!(!s.contains("tab:"), "{s}");
+        // In git, tab switches.
+        app.mode = Mode::NewTaskEnterName {
+            project_dirs: vec!["/src/web".into()],
+            name: "other".into(),
+            folder: Some("/src/web".into()),
+            borrow: false,
+        };
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("in web"), "{s}");
+        assert!(s.contains("tab:use the folder as is"), "{s}");
+    }
+
+    #[test]
+    fn dropping_a_borrowed_folder_says_it_stays() {
+        let info: TaskInfo = serde_json::from_value(serde_json::json!({
+            "name": "notes",
+            "members": [{
+                "id": "m-1", "name": "notes", "repo": "notes",
+                "branch": "", "dir": "/data/notes", "borrowed": true,
+            }],
+            "created_at": 0,
+        }))
+        .unwrap();
+        let mut app = App::new();
+        app.set_tasks(vec![Task::from_info(info, &[])]);
+        app.mode = Mode::ConfirmDropTask {
+            name: "notes".into(),
+            member: None,
+        };
+        let s = screen(&mut app, 100, 30);
+        assert!(s.contains("Borrowed folders stay as they are"), "{s}");
     }
 
     #[test]
@@ -2043,6 +2145,7 @@ mod tests {
             health: Some(MemberHealth::Ok {
                 branch: Some(branch.into()),
             }),
+            borrowed: false,
         }
     }
 
@@ -2443,6 +2546,8 @@ mod tests {
         app.mode = Mode::NewTaskEnterName {
             project_dirs: vec!["/src/api".into()],
             name,
+            folder: None,
+            borrow: false,
         };
         let (s, cursor) = screen_and_cursor(&mut app, 80, 24);
         let row = s
@@ -2522,6 +2627,8 @@ mod tests {
                 Mode::NewTaskEnterName {
                     project_dirs: vec!["/src/api".into()],
                     name: TextInput::from("a-rather-long-task-name-for-a-narrow-popup"),
+                    folder: None,
+                    borrow: false,
                 },
                 Mode::SpawnEnterPath(TextInput::from("~/src")),
                 Mode::ConfirmDropTask {

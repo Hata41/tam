@@ -54,6 +54,19 @@ pub enum Commands {
         #[arg(long)]
         join: bool,
 
+        /// Work in an existing folder (default: the current one) instead of
+        /// creating a worktree: git or not, tam leaves it as it is, and
+        /// dropping the task only stops its agent
+        #[arg(
+            short,
+            long,
+            value_name = "DIR",
+            num_args = 0..=1,
+            default_missing_value = ".",
+            conflicts_with_all = ["source", "repo"]
+        )]
+        borrow: Option<PathBuf>,
+
         /// What the task's members work from: a URL, a ticket id or a path
         /// (expanded by [[brief.patterns]] in the config; default: the file
         /// brief.md in the task's directory, see tam brief)

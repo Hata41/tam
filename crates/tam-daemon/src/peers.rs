@@ -195,6 +195,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from("/w").join(format!("{repo}--feat")),
             health: None,
+            borrowed: false,
         }
     }
 

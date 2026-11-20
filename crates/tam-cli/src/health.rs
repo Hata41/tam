@@ -7,6 +7,13 @@ use tam_proto::{MemberHealth, MemberInfo};
 /// (or not checked yet).
 pub fn problem(member: &MemberInfo) -> Option<String> {
     let dir = member.dir.display();
+    if member.borrowed {
+        // tam did not create it: there or not, nothing else to say.
+        return match member.health.as_ref()? {
+            MemberHealth::Gone { .. } => Some(format!("borrowed folder {dir} is gone")),
+            _ => None,
+        };
+    }
     match member.health.as_ref()? {
         MemberHealth::Ok { .. } => None,
         MemberHealth::Gone {
@@ -74,7 +81,24 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from("/w/app--feat"),
             health,
+            borrowed: false,
         }
+    }
+
+    #[test]
+    fn a_gone_borrowed_folder_can_only_be_dropped() {
+        let mut borrowed = member(Some(MemberHealth::Gone {
+            cannot_repair: Some("a borrowed folder, tam did not create it".into()),
+        }));
+        borrowed.borrowed = true;
+        borrowed.branch = String::new();
+        borrowed.dir = PathBuf::from("/home/me/notes");
+        assert_eq!(
+            ps_note("notes", "notes", &borrowed).unwrap(),
+            "notes: borrowed folder /home/me/notes is gone (tam drop notes)"
+        );
+        borrowed.health = None;
+        assert_eq!(ps_note("notes", "notes", &borrowed), None);
     }
 
     #[test]

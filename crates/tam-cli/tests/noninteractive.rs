@@ -318,6 +318,7 @@ async fn a_task_driven_without_a_terminal() {
             "denied",
             "last_message",
             "last_run",
+            "borrowed",
         ])
     );
     assert_eq!(m["id"], member.as_str());

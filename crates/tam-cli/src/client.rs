@@ -375,6 +375,20 @@ impl Client {
         }
     }
 
+    /// Make the folder `dir` a borrowed member, left as it is: of a new task
+    /// `task`, or with `join` of the existing task `task`.
+    pub async fn borrow_dir(&mut self, task: &str, dir: &Path, join: bool) -> Result<TaskInfo> {
+        let request = Request::BorrowDir {
+            task: task.into(),
+            dir: dir.to_path_buf(),
+            join,
+        };
+        match self.send(request).await? {
+            Response::Task { task, .. } => Ok(task),
+            other => Err(unexpected("BorrowDir", other)),
+        }
+    }
+
     /// Have the daemon create worktrees as the members of a new task `task`,
     /// or with `join` new members of the existing task `task`: all or
     /// nothing, git running in our environment. Returns the task.

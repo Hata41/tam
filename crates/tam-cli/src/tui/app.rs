@@ -21,10 +21,17 @@ pub enum Mode {
     Normal,
     NewTaskPickProject(PickerState),
     /// The task's name, for worktrees in these repositories (main
-    /// checkouts). The name of an existing task adds them to it.
+    /// checkouts), or for the folder picked as it is (`borrow`). The name of
+    /// an existing task adds them to it.
     NewTaskEnterName {
         project_dirs: Vec<PathBuf>,
         name: TextInput,
+        /// The one directory picked, which the task can borrow: work in it
+        /// as it is, no worktree. `None` when several were picked.
+        folder: Option<PathBuf>,
+        /// Borrow `folder`: always for a folder outside git (no
+        /// `project_dirs`), else tab switches.
+        borrow: bool,
     },
     SpawnEnterPath(TextInput),
     ConfirmDropTask {
@@ -126,6 +133,19 @@ pub struct TaskDetail {
     pub messages: Vec<MessageInfo>,
     /// To fetch again (e.g. a run started or ended).
     pub stale: bool,
+}
+
+impl Mode {
+    /// Name a new task: worktrees in the repositories `project_dirs`, or the
+    /// one directory picked, `folder`, borrowed (the only way outside git).
+    pub fn new_task(project_dirs: Vec<PathBuf>, folder: Option<PathBuf>) -> Self {
+        Mode::NewTaskEnterName {
+            borrow: project_dirs.is_empty(),
+            project_dirs,
+            name: TextInput::default(),
+            folder,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

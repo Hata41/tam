@@ -264,6 +264,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from(dir),
             health: None,
+            borrowed: false,
         }
     }
 

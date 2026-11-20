@@ -91,6 +91,7 @@ tam new NAME -d                Don't attach to the agent (--json: print a receip
 tam new NAME -r REPO -r REPO   ... in each of these repositories instead (one member each)
 tam new NAME -r REPO --join    Add a worktree in another repository to the task NAME
 tam new NAME --brief REF       Give the task a brief: a URL, a ticket id or a path (see Brief)
+tam new NAME -b [DIR]          Work in a folder as it is (default: the current one), git or not
 
 tam run NAME                   Start the task's agent, resuming its current session
 tam run NAME --new-session     Start a new session instead
@@ -124,6 +125,8 @@ NAME is a task name, or TASK/MEMBER for one member of the task.
 The daemon checks every task's worktree against git (`git worktree list`) when it starts and every 10 seconds. A worktree deleted outside tam (`rm -rf`, `git worktree remove`) shows as `gone` in `tam ps` and the dashboard, with what can be done. `tam repair` recreates it on its branch: only if the branch still exists, is checked out nowhere else, and git's leftover registration of the directory (if any) has no staged changes. `tam drop` forgets the task. A worktree switched to another branch is not gone; `tam ps` notes the switch. TAM only looks: nothing is recreated or removed unless you ask.
 
 `tam new` names a repository by a path to it (or to any directory in it), or by its project name as `tam ls` and `tam pick` show it (e.g. `api`, or `mnemo (work)` when two projects share a name). It is all or nothing: every repository is checked first (branch free, worktree directory free, `-s REF` present), and if a worktree still cannot be created, the ones created before it are removed again, with the branches created for them. What cannot be removed without losing work is kept, and the error says where. With several repositories, `tam new` starts an agent in each (`-p`: each gets the prompt) and attaches to the first one's (with `-d`, or without a terminal, it attaches to none and prints how to); `tam run`, `tam attach` and the preview act on one member (`NAME/REPO`); `tam stop` and `tam drop` act on the whole task, or on one member given as `NAME/REPO`. Git runs in the environment of the `tam` command that asked (checkout hooks and filters such as git-lfs see your `PATH`), for `tam repair` too.
+
+`tam new NAME -b` borrows a folder instead of creating a worktree: the current one, or DIR (`--join` adds it to the task NAME). In git or not, tam works in it as it is: no branch, no checks, and `tam drop` (`-b` too) stops its agent and forgets it, leaving the folder and whatever is in it alone. A borrowed folder is `gone` while it is missing, and cannot be repaired; a task's worktree cannot be borrowed, but several tasks can borrow the same folder.
 
 `tam adopt` takes over a worktree made by hand (`git worktree add`), from the worktree or any directory in it: it must be a linked worktree (not the main checkout) on a branch. From then on it is a task like any other: `tam drop` removes it.
 
@@ -244,7 +247,8 @@ With `--json`, stdout holds one JSON document and nothing else, also when the co
             "started_at": 1763390000,
             "ended_at": null,
             "exit_code": null
-          }
+          },
+          "borrowed": false
         }
       ]
     }
@@ -256,6 +260,7 @@ With `--json`, stdout holds one JSON document and nothing else, also when the co
 - `pending` (while `blocked` or `question`) is `{"tool", "summary"}`, `turn_error` (while `error`) `{"kind", "message"}`, `denied` (the last tool call auto mode refused in this turn) `{"tool", "summary", "reason"}`.
 - `session_id` is the running agent's session, else the last run's. `last_message` is the start of the agent's last response: `tam result` has all of it. A run's `exit_code` is -1 when it was stopped.
 - `health` is what the daemon saw in git: `{"state": "ok", "branch"}`, `{"state": "gone", "cannot_repair"}` or `{"state": "broken", "problem"}`; `null` until checked.
+- `borrowed` is `true` for a folder tam works in as it is (`tam new -b`): its `branch` is `""`, its `health` `null`, or `gone` while it is missing.
 - Before version 1, `tam ps --json` printed the `tasks` array alone, with the keys up to `last_activity` (tasks) and `health` (members).
 
 `tam new --json` and `tam run --json`: the task's members (`new`) or the one started (`run`). `agent` is `null` when none started, `resumed_session` is `null` for a new session.
@@ -273,7 +278,8 @@ With `--json`, stdout holds one JSON document and nothing else, also when the co
       "branch": "feat",
       "dir": "/home/me/worktrees/app--feat",
       "agent": "claude",
-      "resumed_session": null
+      "resumed_session": null,
+      "borrowed": false
     }
   ],
   "error": null
@@ -381,7 +387,7 @@ Running `tam` with no arguments opens the dashboard:
 
 Tasks are grouped by repository (a task in several under one header naming them, e.g. `backend + frontend`), the most urgent first in each (blocked/question → error → ready → running → idle → stale → gone), then by name. `t` lists them most urgent first across repositories instead, with a REPO column. A task with several members has a row per member below its own, which shows its name alone: each member's row has its status. A working agent's mark is a spinner, and CTX is how full its context is; `▸` marks the member the keys act on. Next to the status, how long it has been in it (without an agent: since the task's last activity). BRANCH compares each worktree with the default branch: `↑` commits ahead, `↓` behind, `*` paths with uncommitted changes, `=` none of them (`…` until git was asked). Git is asked, read-only and one worktree at a time, about every worktree once a minute and after its agent's state changes, and every 10 seconds about the one the pane shows. When the list is above the pane and at least 100 columns wide, a last column says what each member waits on. Columns the width cannot hold go first (AGENT, then CTX), task names last.
 
-Keys: `j`/`k` navigate, `enter` gives the pane the keyboard (what you type goes to the agent, `ctrl-]` comes back to the list), `f` (or `shift-enter`, in terminals that tell it from `enter`: kitty, and others with its keyboard protocol) opens the agent's terminal on the whole screen, `n` creates a task (`tab` picks several repositories, `ctrl-n`/`ctrl-p` move in the list; an existing task's name adds them to it), `r` runs the agent in its current session, `R` in a new session, `s` stops, `a` answers what its agent asks, `d` drops (then `y` keeps the branch, `b` deletes it; in a task with several members, `m` drops the focused member only, `M` with its branch; work that would be lost is shown for a second confirmation; on a `gone` task, `r` recreates the worktree instead), the pane, always shown, is its agent's screen, which takes the pane's size (`h`/`l` or `←`/`→` move to another member of the task, `PgUp`/`PgDn` or `ctrl-u`/`ctrl-d` scroll through its history, `Home` goes to the oldest line, `End` back to live), `gg`/`G` go to the first/last task, `/` filters, `t` switches between grouped by repository and attention first, `T` switches between the `dark` and `unicorn` themes (until you quit: `theme` in the config is the one it starts with), `?` lists every key (custom commands included), `q` quits. When attached to an agent, `ctrl-]` detaches and returns to the dashboard. The footer shows the keys that fit.
+Keys: `j`/`k` navigate, `enter` gives the pane the keyboard (what you type goes to the agent, `ctrl-]` comes back to the list), `f` (or `shift-enter`, in terminals that tell it from `enter`: kitty, and others with its keyboard protocol) opens the agent's terminal on the whole screen, `n` creates a task (`tab` picks several repositories, `ctrl-n`/`ctrl-p` move in the list; an existing task's name adds them to it; a folder outside git, tagged `(folder)`, is borrowed as it is, and with one repository picked, `tab` at the name prompt borrows its folder instead of creating a worktree), `r` runs the agent in its current session, `R` in a new session, `s` stops, `a` answers what its agent asks, `d` drops (then `y` keeps the branch, `b` deletes it; in a task with several members, `m` drops the focused member only, `M` with its branch; work that would be lost is shown for a second confirmation; on a `gone` task, `r` recreates the worktree instead), the pane, always shown, is its agent's screen, which takes the pane's size (`h`/`l` or `←`/`→` move to another member of the task, `PgUp`/`PgDn` or `ctrl-u`/`ctrl-d` scroll through its history, `Home` goes to the oldest line, `End` back to live), `gg`/`G` go to the first/last task, `/` filters, `t` switches between grouped by repository and attention first, `T` switches between the `dark` and `unicorn` themes (until you quit: `theme` in the config is the one it starts with), `?` lists every key (custom commands included), `q` quits. When attached to an agent, `ctrl-]` detaches and returns to the dashboard. The footer shows the keys that fit.
 
 The filter and the project picker match fuzzily: the letters typed, in order, not necessarily together (`unpr` finds `unit-pricing`), the matched letters highlighted. The filter looks at task names and at each member's name, repository and branch (`enter` keeps it, `esc` empties it with the task found still selected); the picker ranks the best matches first. In the filter, the picker and the name and path prompts, `←`/`→`, `home`/`end` and `ctrl-a`/`ctrl-e` move the cursor, `ctrl-←`/`ctrl-→` by word, `ctrl-w` deletes a word, `ctrl-u`/`ctrl-k` to the start/end. `n` opens the picker at once: the projects under `$HOME` are looked for in the background (those found last time show meanwhile).
 

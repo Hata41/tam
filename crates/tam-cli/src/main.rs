@@ -79,6 +79,7 @@ async fn run(cli: Cli) -> Result<()> {
             json,
             repo,
             join,
+            borrow,
             brief,
         } => {
             // A pattern may expand the brief, and give the start prompt.
@@ -88,9 +89,14 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let prompt = prompt.or_else(|| brief.as_ref().and_then(|b| b.prompt.clone()));
             let mut client = client::Client::connect().await?;
-            // A task owns its worktrees: branch NAME of each repository.
-            let (task, members) =
-                new_members(&mut client, &name, source.as_deref(), &repo, join, json).await?;
+            // A task owns its worktrees: branch NAME of each repository;
+            // or borrows a folder, as it is.
+            let (task, members) = match borrow {
+                Some(dir) => borrow_member(&mut client, &name, &dir, join, json).await?,
+                None => {
+                    new_members(&mut client, &name, source.as_deref(), &repo, join, json).await?
+                }
+            };
             // Before the agents start: they are told it.
             if let Some(brief) = &brief {
                 brief::set_new(&mut client, &task.name, &brief.reference).await?;
@@ -659,6 +665,36 @@ async fn new_members(
         }
     }
     Ok((task, new))
+}
+
+/// Make the folder `dir` a borrowed member of a new task `name`, or with
+/// `join` of the existing one. Returns the task and the member.
+async fn borrow_member(
+    client: &mut client::Client,
+    name: &str,
+    dir: &std::path::Path,
+    join: bool,
+    json: bool,
+) -> Result<(TaskInfo, Vec<MemberInfo>)> {
+    use anyhow::Context;
+
+    let dir =
+        std::fs::canonicalize(dir).with_context(|| format!("cannot borrow {}", dir.display()))?;
+    let task = client.borrow_dir(name, &dir, join).await?;
+    let member = task.members.last().cloned().expect("borrowed member");
+    if !json {
+        let at = dir.display();
+        match join {
+            true => println!(
+                "Added {at} to task '{name}' as '{}' (borrowed: dropping it leaves the folder alone)",
+                task.member_label(&member)
+            ),
+            false => println!(
+                "Created task '{name}' in {at} (borrowed: dropping it leaves the folder alone)"
+            ),
+        }
+    }
+    Ok((task, vec![member]))
 }
 
 /// Start an agent in each of a task's new members, as `start` says, then

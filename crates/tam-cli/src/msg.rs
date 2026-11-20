@@ -280,6 +280,7 @@ mod tests {
             branch: "feat".into(),
             dir: PathBuf::from("/w").join(name),
             health: None,
+            borrowed: false,
         };
         TaskInfo {
             name: "feat".into(),

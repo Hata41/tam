@@ -116,12 +116,6 @@ impl Daemon {
                 "migrated ledger to task members"
             );
         }
-        for task in &report.dropped_borrowed {
-            warn!(
-                task = %task,
-                "dropped borrowed task: tasks own their worktrees now (its directory is untouched)"
-            );
-        }
         if report.compacted > 0 {
             info!(removed = report.compacted, "compacted ledger");
         }
@@ -942,6 +936,7 @@ async fn dispatch(request: Request, state: &Arc<Mutex<DaemonState>>) -> Response
         Request::AdoptWorktree { dir, name, join } => {
             handle_adopt_worktree(state, dir, name, join).await
         }
+        Request::BorrowDir { task, dir, join } => handle_borrow_dir(state, &task, dir, join).await,
         Request::Screen { id, from } => match state.lock().await.agents.get(&id) {
             Some(agent) => Response::Screen {
                 screen: agent.screen(from),
@@ -1028,6 +1023,7 @@ async fn handle_spawn(state: &Arc<Mutex<DaemonState>>, spec: SpawnSpec) -> Respo
     } = spec;
 
     // A member's agent runs in its worktree, under the member id.
+    let mut borrowed = false;
     let (id, dir) = match &member {
         Some(member) => {
             let Some((task, info)) = state.ledger.member(member) else {
@@ -1060,6 +1056,7 @@ async fn handle_spawn(state: &Arc<Mutex<DaemonState>>, spec: SpawnSpec) -> Respo
                     message: format!("'{}' already has a running agent", task.member_label(&info)),
                 };
             }
+            borrowed = info.borrowed;
             (Some(member.clone()), info.dir)
         }
         None => (id, dir),
@@ -1096,11 +1093,13 @@ async fn handle_spawn(state: &Arc<Mutex<DaemonState>>, spec: SpawnSpec) -> Respo
         .unwrap_or_default();
     let resolved: Arc<dyn provider::Provider> =
         Arc::from(provider::resolve_with(&provider, access));
-    match resolved.ensure_dir_trusted(&dir) {
-        Ok(true) => info!(dir = %dir.display(), "marked the folder trusted for {provider}"),
-        Ok(false) => {}
+    // Not a borrowed folder: trusting `~` would trust everything under it.
+    // The agent asks about it itself, in a folder the user picked.
+    match (!borrowed).then(|| resolved.ensure_dir_trusted(&dir)) {
+        Some(Ok(true)) => info!(dir = %dir.display(), "marked the folder trusted for {provider}"),
+        Some(Ok(false)) | None => {}
         // The agent can still start: it then asks about trust itself.
-        Err(e) => warn!(dir = %dir.display(), "could not pre-trust the folder: {e:#}"),
+        Some(Err(e)) => warn!(dir = %dir.display(), "could not pre-trust the folder: {e:#}"),
     }
     match Agent::spawn(
         resolved,
@@ -1416,21 +1415,25 @@ async fn handle_drop_task(
     force: bool,
     delete_branch: bool,
 ) -> Response {
-    let dirs = {
+    let (dirs, borrowed) = {
         let mut state = state.lock().await;
         let Some(task) = state.ledger.task(name) else {
             return Response::Error {
                 message: format!("task '{}' not found", name),
             };
         };
-        let dirs: Vec<PathBuf> = task.members.iter().map(|m| m.dir.clone()).collect();
+        // Borrowed folders are left alone: never checked, never removed.
+        let (borrowed, owned): (Vec<_>, Vec<_>) = task.members.iter().partition(|m| m.borrowed);
+        let dirs: Vec<PathBuf> = owned.iter().map(|m| m.dir.clone()).collect();
+        let borrowed: Vec<PathBuf> = borrowed.iter().map(|m| m.dir.clone()).collect();
         if !state.dropping.insert(name.to_string()) {
             return Response::Error {
                 message: format!("task '{}' is already being dropped", name),
             };
         }
-        dirs
+        (dirs, borrowed)
     };
+    let owns_worktrees = !dirs.is_empty();
 
     let worktrees = state.lock().await.worktrees.clone();
     let held = worktrees.lock().await;
@@ -1443,6 +1446,12 @@ async fn handle_drop_task(
         Ok(removal) => removal,
         Err(response) => return response,
     };
+    removal.deleted &= owns_worktrees;
+    if delete_branch {
+        removal
+            .warnings
+            .extend(borrowed.iter().map(|dir| borrowed_left(dir)));
+    }
     if let Err(e) = state.ledger.drop_task(name, removal.deleted) {
         return Response::Error {
             message: format!("cannot record the drop of '{name}': {e:#}; drop it again to finish"),
@@ -1637,6 +1646,20 @@ async fn stop_and_remove_member(
     force: bool,
     delete_branch: bool,
 ) -> Result<Removal, Response> {
+    if member.borrowed {
+        // A borrowed folder is left alone: only its agent goes.
+        if let Some(agent) = state.lock().await.take_member_agent(&member.id) {
+            info!(member = %member.id, "stopping agent of dropped member");
+            blocking(move || agent.kill_and_drop()).await?;
+        }
+        return Ok(Removal {
+            deleted: false,
+            warnings: delete_branch
+                .then(|| borrowed_left(&member.dir))
+                .into_iter()
+                .collect(),
+        });
+    }
     let check = |dir: PathBuf| blocking(move || vec![worktrees::check(dir)]);
     let mut checked = check(member.dir.clone()).await?;
     if !force {
@@ -1676,6 +1699,14 @@ impl DaemonState {
         self.agent_gone(member, &agent, -1);
         Some(agent)
     }
+}
+
+/// What a drop with `delete_branch` says of a borrowed folder.
+fn borrowed_left(dir: &std::path::Path) -> String {
+    format!(
+        "{} is a borrowed folder: left as it is, no branch deleted",
+        dir.display()
+    )
 }
 
 /// Refuse a drop that would lose work, or whose worktree cannot be checked.
@@ -1728,10 +1759,9 @@ async fn reconcile(state: &Arc<Mutex<DaemonState>>) {
     let (ids, recorded): (Vec<String>, Vec<Recorded>) =
         state.lock().await.recorded_worktrees().into_iter().unzip();
     let observed = observe(recorded).await;
-    state
-        .lock()
-        .await
-        .record_health(ids.into_iter().zip(observed));
+    let mut state = state.lock().await;
+    state.record_health(ids.into_iter().zip(observed));
+    state.check_borrowed();
 }
 
 /// [`worktrees::observe`], off the async runtime.
@@ -1763,13 +1793,14 @@ impl From<&NewMember> for Recorded {
 
 impl DaemonState {
     /// The worktrees of the members of tasks not being dropped, with their
-    /// member ids.
+    /// member ids. Borrowed folders are not worktrees: see `check_borrowed`.
     fn recorded_worktrees(&self) -> Vec<(String, Recorded)> {
         self.ledger
             .tasks()
             .into_iter()
             .filter(|t| !self.dropping.contains(&t.name))
             .flat_map(|t| t.members)
+            .filter(|m| !m.borrowed)
             .map(|m| {
                 let recorded = Recorded {
                     repo: self.ledger.repo_root(&m.id),
@@ -1816,6 +1847,32 @@ impl DaemonState {
         }
     }
 
+    /// Record whether the borrowed folders of tasks not being dropped are
+    /// still there, pushing `TaskUpdated` for each task where it changed.
+    fn check_borrowed(&mut self) {
+        let mut changed = BTreeSet::new();
+        for task in self.ledger.tasks() {
+            if self.dropping.contains(&task.name) {
+                continue;
+            }
+            for m in task.members.iter().filter(|m| m.borrowed) {
+                let present = m.dir.is_dir();
+                if let Some(task) = self.ledger.observe_folder(&m.id, present) {
+                    match present {
+                        true => info!(task = %task, member = %m.id, "borrowed folder back"),
+                        false => warn!(task = %task, member = %m.id, "borrowed folder gone"),
+                    }
+                    changed.insert(task);
+                }
+            }
+        }
+        for name in changed {
+            if let Some(task) = self.ledger.task(&name) {
+                self.broadcast(Event::TaskUpdated { task });
+            }
+        }
+    }
+
     /// Record the observed health of a task's new members (`observed` in
     /// member order) and return the task with it. Pushes nothing: the caller
     /// announces the task.
@@ -1847,6 +1904,11 @@ async fn handle_repair_member(
             Err(e) => return error(format!("{e:#}")),
         };
         let label = task.member_label(&member);
+        if member.borrowed {
+            return error(format!(
+                "'{label}' is a borrowed folder: tam did not create it, and cannot recreate it"
+            ));
+        }
         if state.dropping.contains(&task.name) {
             return error(format!("task '{}' is being dropped", task.name));
         }
@@ -1962,6 +2024,53 @@ async fn handle_adopt_worktree(
     let task = state.ledger.task(&task.name).unwrap_or(task);
     info!(task = %task.name, member = %id, dir = %member.dir.display(), "worktree adopted");
     if join.is_some() {
+        state.broadcast(Event::TaskUpdated { task: task.clone() });
+    } else {
+        state.broadcast(Event::TaskCreated { task: task.clone() });
+    }
+    let runs = state.ledger.runs(&task.name);
+    Response::Task { task, runs }
+}
+
+/// Make the folder `dir` a borrowed member of a new task `task`, or with
+/// `join` of the existing task `task` (`Request::BorrowDir`).
+async fn handle_borrow_dir(
+    state: &Arc<Mutex<DaemonState>>,
+    task: &str,
+    dir: PathBuf,
+    join: bool,
+) -> Response {
+    let error = |message: String| Response::Error { message };
+    let dir = match std::fs::canonicalize(&dir) {
+        Ok(dir) if dir.is_dir() => dir,
+        Ok(_) => return error(format!("cannot borrow {}: not a directory", dir.display())),
+        Err(e) => return error(format!("cannot borrow {}: {e}", dir.display())),
+    };
+    let mut state = state.lock().await;
+    if join && state.dropping.contains(task) {
+        return error(format!("task '{task}' is being dropped"));
+    }
+    // A worktree may be recorded through a symlink: compare resolved.
+    let tasks = state.ledger.tasks();
+    let owner = tasks.iter().find(|t| {
+        t.members
+            .iter()
+            .any(|m| !m.borrowed && worktree::same_path(&m.dir, &dir))
+    });
+    if let Some(owner) = owner {
+        return error(format!(
+            "{} is the worktree of task '{}'",
+            dir.display(),
+            owner.name
+        ));
+    }
+    let task = match state.ledger.borrow_dir(task, &dir, join) {
+        Ok(task) => task,
+        Err(e) => return error(format!("{e:#}")),
+    };
+    let id = task.members.last().map(|m| m.id.as_str()).unwrap_or("");
+    info!(task = %task.name, member = %id, dir = %dir.display(), "folder borrowed");
+    if join {
         state.broadcast(Event::TaskUpdated { task: task.clone() });
     } else {
         state.broadcast(Event::TaskCreated { task: task.clone() });

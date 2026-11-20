@@ -1617,15 +1617,20 @@ async fn daemon_migrates_a_legacy_ledger() {
     .unwrap();
     let sock = start_daemon(dir.path()).await;
     let mut cmd = Conn::connect(&sock).await;
-    let task = match cmd.request(&Request::ListTasks).await {
+    let (task, here) = match cmd.request(&Request::ListTasks).await {
         Response::Tasks { tasks } => {
-            assert_eq!(tasks.len(), 1, "{tasks:?}");
-            tasks.into_iter().next().unwrap()
+            assert_eq!(tasks.len(), 2, "{tasks:?}");
+            let mut tasks = tasks.into_iter();
+            (tasks.next().unwrap(), tasks.next().unwrap())
         }
         other => panic!("expected Tasks, got {other:?}"),
     };
     assert_eq!(task.name, "feat");
     assert_eq!(task.members[0].repo, "app");
+    // A borrowed task stays one: its folder, as it is.
+    assert_eq!(here.name, "here");
+    assert!(here.members[0].borrowed);
+    assert_eq!(here.members[0].dir, PathBuf::from("/src/app"));
     let runs = cmd.runs("feat").await;
     assert_eq!(runs[0].member, task.members[0].id);
     assert_eq!(runs[0].session_id.as_deref(), Some("s1"));
@@ -2501,4 +2506,110 @@ async fn attach_replays_history_then_screen_then_live_output() {
     let lines: Vec<&str> = all.lines().filter(|l| !l.is_empty()).collect();
     let expected: Vec<String> = (1..=40).map(|i| i.to_string()).collect();
     assert_eq!(lines[..40], expected);
+}
+
+async fn borrow(conn: &mut Conn, task: &str, dir: &std::path::Path, join: bool) -> Response {
+    conn.request(&Request::BorrowDir {
+        task: task.into(),
+        dir: dir.into(),
+        join,
+    })
+    .await
+}
+
+fn borrowed_task(resp: Response) -> tam_proto::TaskInfo {
+    match resp {
+        Response::Task { task, .. } => {
+            assert!(task.members.last().unwrap().borrowed, "{task:?}");
+            task
+        }
+        other => panic!("expected Task, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn borrowed_folders_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = start_daemon(dir.path()).await;
+    let mut cmd = Conn::connect(&sock).await;
+
+    // A main checkout with work in progress, borrowed as it is.
+    let (repo, wt) = git_worktree(&dir.path().join("app"), "feat");
+    std::fs::write(repo.join("wip.txt"), "wip").unwrap();
+    let main = borrowed_task(borrow(&mut cmd, "main", &repo, false).await);
+    assert_eq!(main.members[0].dir, repo.canonicalize().unwrap());
+    // Not a directory, or a task's worktree: refused.
+    let resp = borrow(&mut cmd, "x", &dir.path().join("missing"), false).await;
+    assert!(matches!(resp, Response::Error { .. }), "{resp:?}");
+    cmd.create_in_repo("feat", &repo, &wt).await;
+    let resp = borrow(&mut cmd, "x", &wt, false).await;
+    assert!(
+        matches!(&resp, Response::Error { message } if message.contains("worktree of task 'feat'")),
+        "{resp:?}"
+    );
+
+    // Dropped with its agent running and the branch asked for: the agent
+    // goes, the folder, its changes and its branch stay.
+    let id = main.members[0].id.clone();
+    let resp = cmd.spawn_for_member(&id, "sleep", &["3600"]).await;
+    assert!(matches!(resp, Response::Spawned { .. }), "{resp:?}");
+    let resp = cmd.request(&drop_request("main", false, true)).await;
+    assert!(
+        matches!(&resp, Response::Dropped { warnings }
+            if warnings.len() == 1 && warnings[0].contains("borrowed folder")),
+        "{resp:?}"
+    );
+    assert_eq!(agent_count(&mut cmd).await, 0);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("wip.txt")).unwrap(),
+        "wip"
+    );
+    assert!(branch_exists(&repo, "main"));
+    assert!(wt.exists());
+
+    // A plain folder joining a task: dropped alone, left in place.
+    let notes = dir.path().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let feat = borrowed_task(borrow(&mut cmd, "feat", &notes, true).await);
+    assert_eq!(feat.members.len(), 2);
+    let resp = cmd
+        .request(&drop_request(&feat.members[1].id, false, false))
+        .await;
+    assert!(
+        matches!(&resp, Response::Dropped { warnings } if warnings.is_empty()),
+        "{resp:?}"
+    );
+    assert!(notes.exists());
+    assert!(wt.exists());
+    match cmd
+        .request(&Request::GetTask {
+            name: "feat".into(),
+        })
+        .await
+    {
+        Response::Task { task, .. } => assert_eq!(task.members.len(), 1),
+        other => panic!("expected Task, got {other:?}"),
+    }
+
+    // Health only says whether the folder is there; never repaired.
+    borrowed_task(borrow(&mut cmd, "notes", &notes, false).await);
+    let resp = cmd.repair("notes").await;
+    assert!(
+        matches!(&resp, Response::Error { message } if message.contains("borrowed folder")),
+        "{resp:?}"
+    );
+    assert_eq!(cmd.reconcile_health("notes").await, None);
+    std::fs::remove_dir(&notes).unwrap();
+    let gone = cmd.reconcile_health("notes").await;
+    assert!(
+        matches!(
+            &gone,
+            Some(tam_proto::MemberHealth::Gone {
+                cannot_repair: Some(_)
+            })
+        ),
+        "{gone:?}"
+    );
+    std::fs::create_dir(&notes).unwrap();
+    assert_eq!(cmd.reconcile_health("notes").await, None);
 }
