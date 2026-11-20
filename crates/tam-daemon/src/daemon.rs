@@ -1094,7 +1094,14 @@ async fn handle_spawn(state: &Arc<Mutex<DaemonState>>, spec: SpawnSpec) -> Respo
         .as_ref()
         .map(|a| a.read_only.clone())
         .unwrap_or_default();
-    let resolved = Arc::from(provider::resolve_with(&provider, access));
+    let resolved: Arc<dyn provider::Provider> =
+        Arc::from(provider::resolve_with(&provider, access));
+    match resolved.ensure_dir_trusted(&dir) {
+        Ok(true) => info!(dir = %dir.display(), "marked the folder trusted for {provider}"),
+        Ok(false) => {}
+        // The agent can still start: it then asks about trust itself.
+        Err(e) => warn!(dir = %dir.display(), "could not pre-trust the folder: {e:#}"),
+    }
     match Agent::spawn(
         resolved,
         &dir,

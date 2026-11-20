@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use anyhow::Context;
 use serde_json::Value;
 use tam_proto::{AgentDetail, AgentError, AgentResponse, AgentState, DeniedTool, Pending};
 
@@ -142,6 +143,14 @@ pub trait Provider: Send + Sync {
     /// and the bracketed paste markers literally.
     fn pty_input(&self, text: &str) -> Vec<u8> {
         crate::inbox::one_line(text).into_bytes()
+    }
+
+    /// Pre-trust `dir`, so the agent does not stall at a "do you trust
+    /// this folder?" prompt on its first run there. The prompt comes before
+    /// any hook runs, so tam would never see the agent waiting. Called
+    /// before every spawn; `true` when it newly trusted `dir`.
+    fn ensure_dir_trusted(&self, _dir: &Path) -> anyhow::Result<bool> {
+        Ok(false)
     }
 }
 
@@ -370,6 +379,11 @@ impl Provider for ClaudeProvider {
 
     fn pty_input(&self, text: &str) -> Vec<u8> {
         crate::inbox::bracketed_paste(text)
+    }
+
+    fn ensure_dir_trusted(&self, dir: &Path) -> anyhow::Result<bool> {
+        let path = claude_state_file().context("cannot locate Claude's state file")?;
+        ensure_claude_dir_trusted_at(&path, dir)
     }
 }
 
@@ -604,6 +618,87 @@ fn claude_config_dir() -> Option<PathBuf> {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude")),
     }
+}
+
+/// Claude's global state file, which holds folder trust:
+/// `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`.
+fn claude_state_file() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join(".claude.json")),
+        _ => Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude.json")),
+    }
+}
+
+// --- Claude folder trust ---
+
+/// Mark `dir` trusted in Claude's state file, as accepting its trust
+/// dialog would. New worktrees sit outside any trusted tree and hit the
+/// dialog every time.
+///
+/// Leaves the file alone when `dir` or an ancestor is already trusted
+/// (Claude trusts a tree from its root), and keeps every other field.
+/// Returns `true` only when it wrote a new entry.
+pub fn ensure_claude_dir_trusted_at(state_file: &Path, dir: &Path) -> anyhow::Result<bool> {
+    // Claude keys projects by its canonical working directory.
+    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+
+    let mut root: Value = match std::fs::read_to_string(state_file) {
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse {}", state_file.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to read {}", state_file.display()))
+        }
+    };
+
+    let projects = root
+        .as_object_mut()
+        .context("Claude's state file is not an object")?
+        .entry("projects")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("its projects are not an object")?;
+
+    if dir_is_trusted(projects, &canonical) {
+        return Ok(false);
+    }
+
+    let entry = projects
+        .entry(canonical.to_string_lossy().into_owned())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("its project entry is not an object")?;
+    entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    entry
+        .entry("hasCompletedProjectOnboarding")
+        .or_insert(Value::Bool(true));
+
+    write_json_atomic(state_file, &root)?;
+    Ok(true)
+}
+
+/// Whether `dir` or one of its ancestors has `hasTrustDialogAccepted`.
+fn dir_is_trusted(projects: &serde_json::Map<String, Value>, dir: &Path) -> bool {
+    dir.ancestors().any(|p| {
+        projects
+            .get(p.to_string_lossy().as_ref())
+            .and_then(|e| e.get("hasTrustDialogAccepted"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    })
+}
+
+/// Write `value` to `path` through a temp file and a rename, so a Claude
+/// reading it at the same time never sees half a file.
+fn write_json_atomic(path: &Path, value: &Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tam-tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
 }
 
 /// Whether a transcript of `session` is in one of Claude's project
@@ -1027,6 +1122,116 @@ pub fn claude_access_settings(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn trust_key(dir: &Path) -> String {
+        std::fs::canonicalize(dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn trust_writes_entry_for_fresh_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".claude.json");
+        let dir = tmp.path().join("worktrees/app--feat");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(ensure_claude_dir_trusted_at(&state, &dir).unwrap());
+
+        let entry = &read_json(&state)["projects"][trust_key(&dir)];
+        assert_eq!(entry["hasTrustDialogAccepted"], true);
+        assert_eq!(entry["hasCompletedProjectOnboarding"], true);
+    }
+
+    #[test]
+    fn trust_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".claude.json");
+        let dir = tmp.path().join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(ensure_claude_dir_trusted_at(&state, &dir).unwrap());
+        let first = std::fs::read_to_string(&state).unwrap();
+        assert!(!ensure_claude_dir_trusted_at(&state, &dir).unwrap());
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), first);
+    }
+
+    #[test]
+    fn trust_skips_dir_under_trusted_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".claude.json");
+        let parent = tmp.path().join("Workspace");
+        let child = parent.join("proj/sub");
+        std::fs::create_dir_all(&child).unwrap();
+        let trusted = serde_json::json!({
+            "projects": { trust_key(&parent): { "hasTrustDialogAccepted": true } }
+        });
+        std::fs::write(&state, serde_json::to_string_pretty(&trusted).unwrap()).unwrap();
+        let before = std::fs::read_to_string(&state).unwrap();
+
+        assert!(!ensure_claude_dir_trusted_at(&state, &child).unwrap());
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), before);
+    }
+
+    #[test]
+    fn trust_keeps_other_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".claude.json");
+        let dir = tmp.path().join("fresh");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Claude already made an entry for `dir`, without trust.
+        let existing = serde_json::json!({
+            "firstStartTime": "2020-01-01",
+            "projects": {
+                "/some/other": { "hasCompletedProjectOnboarding": false },
+                trust_key(&dir): {
+                    "allowedTools": ["Bash"],
+                    "hasCompletedProjectOnboarding": false,
+                },
+            }
+        });
+        std::fs::write(&state, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        assert!(ensure_claude_dir_trusted_at(&state, &dir).unwrap());
+
+        let root = read_json(&state);
+        assert_eq!(root["firstStartTime"], "2020-01-01");
+        assert_eq!(
+            root["projects"]["/some/other"]["hasCompletedProjectOnboarding"],
+            false
+        );
+        let entry = &root["projects"][trust_key(&dir)];
+        assert_eq!(entry["hasTrustDialogAccepted"], true);
+        assert_eq!(entry["allowedTools"], serde_json::json!(["Bash"]));
+        // Onboarding is Claude's to finish: left as it was.
+        assert_eq!(entry["hasCompletedProjectOnboarding"], false);
+        assert!(!state.with_extension("tam-tmp").exists());
+    }
+
+    #[test]
+    fn trust_leaves_a_state_file_it_cannot_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".claude.json");
+        std::fs::write(&state, "{ not json").unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(ensure_claude_dir_trusted_at(&state, &dir).is_err());
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn only_claude_has_a_trust_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!resolve_with("codex", None)
+            .ensure_dir_trusted(tmp.path())
+            .unwrap());
+    }
 
     #[test]
     fn claude_provider_basics() {
